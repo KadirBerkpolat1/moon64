@@ -9,7 +9,8 @@
 #
 # Flags:
 #   --with-cloudredirect   build and stage the 64-bit CloudRedirect pair
-#   --with-lumen-patch     apply LuaTools patches into ~/.local/share/Lumen/
+#   --with-lumen-patch     overlay the pinned Lumen + LuaTools trees into
+#                          ~/.local/share/Lumen/ (fixes menu, FakeAppId swap)
 #
 # Layout it produces:
 #   ~/.local/share/moon64/SLSsteam.so.64        staged 64-bit SLSsteam
@@ -18,7 +19,8 @@
 #   ~/.local/share/moon64/moon64                the switcher
 #   ~/.local/share/SLSsteam/SLSsteam.so.32      saved 32-bit SLSsteam (rollback)
 #   ~/.local/share/CloudRedirect/<f>.64/.32     staged CloudRedirect variants
-#   ~/.local/share/Lumen/{lua,...}              LuaTools patches (--with-lumen-patch)
+#   ~/.local/share/Lumen/lua                    Lumen fork tree (--with-lumen-patch)
+#   ~/.local/share/Lumen/luatools/plugin        LuaTools plugin tree (same flag)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -329,32 +331,107 @@ else
     dim "CloudRedirect not requested; pass --with-cloudredirect to include it"
 fi
 
-# --- 5. Lumen / LuaTools patches (explicit opt-in) -------------------------
-if [ "$with_lumen_patch" = 1 ]; then
-    if [ -d "$HERE/patch/lumen" ] && [ -d "$HOME/.local/share/Lumen/lua" ]; then
-        stamp="$MOON_DIR/lumen-patch.backup-$(date +%Y%m%d-%H%M%S)"
-        changed=0
-        while IFS= read -r -d '' src; do
-            rel="${src#"$HERE"/patch/lumen/}"
-            dst="$HOME/.local/share/Lumen/$rel"
-            [ -f "$dst" ] || continue
-            cmp -s "$src" "$dst" && continue
+# --- 5. Lumen + LuaTools plugin trees (explicit opt-in) --------------------
+# These used to be a handful of patch files copied over the installed tree. That
+# could not work: the fixes menu is 24 commits deep on the Lumen fork, six of its
+# files do not exist upstream at all, and the copy loop skipped any destination
+# that did not already exist -- so on a fresh v2.9 it installed nothing and the
+# menu called six RPCs that were never registered. Install the trees instead.
+
+# fetch_pinned <repo-url> <ref> <dir> -> 0 when <dir> is a usable checkout.
+# Private repos need credentials; a bare git clone stops at a prompt, which in a
+# non-interactive installer just reads as "clone failed".
+fetch_pinned() {
+    local repo="$1" ref="$2" dir="$3" slug cloned=0
+    if [ -f "$dir/.git/HEAD" ]; then
+        ok "using checkout at $dir"
+        return 0
+    fi
+    command -v git >/dev/null || { bad "git is required for $repo"; return 1; }
+    mkdir -p "$(dirname "$dir")" || { bad "cannot create $(dirname "$dir")"; return 1; }
+    slug="${repo#https://github.com/}"; slug="${slug%.git}"
+    dim "cloning $slug ($ref) into $dir"
+    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+        gh repo clone "$slug" "$dir" -- --depth 1 --branch "$ref" >/dev/null 2>&1 && cloned=1
+    fi
+    if [ "$cloned" = 0 ]; then
+        GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$ref" \
+            "$repo" "$dir" >/dev/null 2>&1 && cloned=1
+    fi
+    if [ "$cloned" = 0 ]; then
+        bad "cannot fetch $slug"
+        dim "  either: gh auth login"
+        dim "  or:     git clone $repo $dir"
+        return 1
+    fi
+    ok "cloned $slug into $dir"
+    return 0
+}
+
+# overlay_tree <src> <dst> <label> — copy every file from src into dst.
+# Files are created when missing (the whole point of the old bug), and an
+# existing file is backed up before being replaced. Files present in dst but
+# absent from src are reported, never deleted: dst also holds runtime state.
+overlay_tree() {
+    local src="$1" dst="$2" label="$3" rel stamp changed=0 added=0
+    stamp="$MOON_DIR/$label.backup-$(date +%Y%m%d-%H%M%S)"
+    while IFS= read -r -d '' f; do
+        rel="${f#"$src"/}"
+        if [ -f "$dst/$rel" ]; then
+            cmp -s "$f" "$dst/$rel" && continue
             mkdir -p "$stamp/$(dirname "$rel")" 2>/dev/null || true
-            cp -a "$dst" "$stamp/$rel" 2>/dev/null || true
-            install -m 644 "$src" "$dst" || die "cannot patch $dst"
+            cp -a "$dst/$rel" "$stamp/$rel" 2>/dev/null || true
+            install -m 644 "$f" "$dst/$rel" || die "cannot write $dst/$rel"
             changed=$((changed+1))
-            dim "patched ~/${dst#"$HOME"/}"
-        done < <(find "$HERE/patch/lumen" -type f -print0)
-        if [ "$changed" -gt 0 ]; then
-            ok "applied $changed Lumen patch(es) (backup: $stamp)"
         else
-            ok "Lumen already patched"
+            mkdir -p "$(dirname "$dst/$rel")" || die "cannot create $(dirname "$dst/$rel")"
+            install -m 644 "$f" "$dst/$rel" || die "cannot write $dst/$rel"
+            added=$((added+1))
+            dim "added ~/${dst#"$HOME"/}/$rel"
         fi
+    done < <(find "$src" -type f -print0)
+    if [ "$changed" -gt 0 ] || [ "$added" -gt 0 ]; then
+        ok "$label: $added added, $changed updated (backup: $stamp)"
     else
-        dim "Lumen not installed or no patches present; skipping"
+        ok "$label: already current"
+    fi
+}
+
+if [ "$with_lumen_patch" = 1 ]; then
+    lumen_src="${LUMEN_SRC:-}"
+    if [ -z "$lumen_src" ]; then
+        lumen_src="$(dirname "$HERE")/../lumen"
+        [ -f "$lumen_src/lua/boot.lua" ] || lumen_src="$LUMEN_CLONE_DIR"
+    fi
+    if fetch_pinned "$LUMEN_REPO" "$LUMEN_REF" "$lumen_src"; then
+        if [ -d "$HOME/.local/share/Lumen/lua" ]; then
+            # Refuse a cross-version overlay: the fork tracks a specific Lumen.
+            if [ -f "$HOME/.local/share/Lumen/versions.json" ] && \
+               [ -f "$lumen_src/README.md" ]; then
+                inst="$(tr -d ' \n' < "$HOME/.local/share/Lumen/versions.json" \
+                        | /usr/bin/grep -o '"lumen":{[^}]*}' | /usr/bin/grep -o '"tag":"v[0-9.]*"' | head -1)"
+                [ -n "$inst" ] && dim "installed Lumen ${inst#*\"tag\":}"
+            fi
+            overlay_tree "$lumen_src/lua" "$HOME/.local/share/Lumen/lua" lumen-patch
+        else
+            warn "Lumen is not installed; skipping its tree"
+            dim "  install Lumen first (swwayps/lumen release), then re-run"
+        fi
+        if [ -d "$HOME/.local/share/Lumen/luatools" ]; then
+            lut_src="${LUATOOLS_SRC:-}"
+            if [ -z "$lut_src" ]; then
+                lut_src="$(dirname "$HERE")/../luatools-moon"
+                [ -d "$lut_src/plugin" ] || lut_src="$LUATOOLS_CLONE_DIR"
+            fi
+            if fetch_pinned "$LUATOOLS_REPO" "$LUATOOLS_REF" "$lut_src"; then
+                # The fork keeps the plugin under plugin/; the install keeps it
+                # directly under luatools/ (luatools/{plugin.json,backend,public}).
+                overlay_tree "$lut_src/plugin" "$HOME/.local/share/Lumen/luatools" luatools-patch
+            fi
+        fi
     fi
 else
-    dim "Lumen patches not requested; pass --with-lumen-patch to apply"
+    dim "Lumen/LuaTools trees not requested; pass --with-lumen-patch to install them"
 fi
 
 # --- 6. report -------------------------------------------------------------
