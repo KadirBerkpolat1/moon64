@@ -1,0 +1,4 @@
+# build trees and downloaded sources stay out of the repo
+.build/
+out/
+bin/__pycache__/

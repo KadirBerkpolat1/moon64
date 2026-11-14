@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# moon64 — run Steam on the 64-bit steamrt64 client with the SLSsteam stack.
+#
+# Why a switcher rather than just a wrapper: the 32-bit stack — SLSsteam.so,
+# library-inject.so, cloud_redirect.so — is ELFCLASS32 and cannot be loaded into
+# a 64-bit client. Switching clients is therefore all-or-nothing, and this is
+# the single place that decides which side is active.
+#
+#   moon64 on      64-bit client + 64-bit SLSsteam + netsock64 (P2P cert patch)
+#   moon64 off     the previous 32-bit stack, byte-for-byte restored
+#   moon64 status  what is staged, what is active, which client Steam would start
+#   moon64 doctor  whether the 64-bit path can work right now, and why not
+#
+# `on` and `off` only swap files that install.sh already staged: recovery never
+# needs the network.
+set -uo pipefail
+
+MOON_DIR="${MOON64_DIR:-$HOME/.local/share/moon64}"
+SLS_DIR="$HOME/.local/share/SLSsteam"
+CR_DIR="$HOME/.local/share/CloudRedirect"
+STEAM_ROOTS=("$HOME/.steam/steam" "$HOME/.local/share/Steam" "$HOME/.steam/debian-installation")
+
+c_red=$'\033[38;5;203m'; c_grn=$'\033[38;5;114m'; c_yel=$'\033[38;5;221m'
+c_dim=$'\033[2m'; c_nc=$'\033[0m'
+if [ ! -t 1 ] || [ -n "${NO_COLOR:-}" ]; then c_red=; c_grn=; c_yel=; c_dim=; c_nc=; fi
+ok()   { printf '%s  ok  %s %s\n' "$c_grn" "$c_nc" "$*"; }
+warn() { printf '%s warn %s %s\n' "$c_yel" "$c_nc" "$*"; }
+bad()  { printf '%s fail %s %s\n' "$c_red" "$c_nc" "$*"; }
+dim()  { printf '%s      %s%s\n' "$c_dim" "$*" "$c_nc"; }
+die()  { bad "$*"; exit 1; }
+
+elfbits() { [ -f "$1" ] && file -b "$1" 2>/dev/null | sed -n 's/^ELF \(64\|32\)-bit.*/\1/p'; }
+
+steam_running() {
+    local pid
+    pid="$(cat "$HOME/.steam/steam.pid" 2>/dev/null || true)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+require_steam_stopped() {
+    steam_running && die "Steam is running (pid $(cat "$HOME/.steam/steam.pid" 2>/dev/null)). Close it completely first."
+    return 0
+}
+
+# --- client selection ------------------------------------------------------
+# steam.sh decides the client from these switches. Both must agree; leaving one
+# behind is how a stack ends up half-migrated.
+enable_64bit_client() {
+    local r
+    for r in "${STEAM_ROOTS[@]}"; do
+        [ -d "$r" ] || continue
+        : > "$r/.steam-enable-steamrt64-client" 2>/dev/null || true
+        rm -f "$r/.steam-disable-steamrt64-client" 2>/dev/null || true
+    done
+}
+
+disable_64bit_client() {
+    local r
+    for r in "${STEAM_ROOTS[@]}"; do
+        [ -d "$r" ] || continue
+        rm -f "$r/.steam-enable-steamrt64-client" 2>/dev/null || true
+        : > "$r/.steam-disable-steamrt64-client" 2>/dev/null || true
+    done
+}
+
+# --- file swaps ------------------------------------------------------------
+# swap_in <staged> <active> : move the staged file into place, keeping whatever
+# was active as <active>.32 the first time so `off` is exact.
+swap_in() {
+    local staged="$1" active="$2" saved="$2.32"
+    [ -f "$staged" ] || return 1
+    mkdir -p "$(dirname "$active")" || die "cannot create $(dirname "$active")"
+    if [ -f "$active" ] && [ ! -f "$saved" ] && [ "$(elfbits "$active")" != 64 ]; then
+        cp -a "$active" "$saved" || die "cannot save $active"
+    fi
+    install -m 755 "$staged" "$active" || die "cannot install $staged"
+    return 0
+}
+
+swap_out() {
+    local active="$1" saved="$2"
+    [ -f "$saved" ] || return 1
+    install -m 755 "$saved" "$active" || die "cannot restore $active"
+    return 0
+}
+
+# --- wrapper ---------------------------------------------------------------
+write_wrapper() {
+    local mode="$1" wrapper="$SLS_DIR/path/steam"
+    local backup="$MOON_DIR/wrapper.32.bak"
+    mkdir -p "$MOON_DIR" "$(dirname "$wrapper")" || die "cannot create $(dirname "$wrapper")"
+    if [ "$mode" = on ]; then
+        [ -f "$MOON_DIR/wrapper.64.sh" ] || die "$MOON_DIR/wrapper.64.sh missing — run install.sh"
+        # Save the original launcher only if it is not already ours.
+        if [ -f "$wrapper" ] && [ ! -f "$backup" ] \
+           && ! cmp -s "$wrapper" "$MOON_DIR/wrapper.64.sh"; then
+            cp -a "$wrapper" "$backup" || die "cannot back up $wrapper"
+        fi
+        install -m 755 "$MOON_DIR/wrapper.64.sh" "$wrapper" || die "cannot install the 64-bit wrapper"
+        ok "wrapper: $wrapper (64-bit)"
+    else
+        if [ -f "$backup" ]; then
+            install -m 755 "$backup" "$wrapper" || die "cannot restore the 32-bit wrapper"
+            ok "wrapper: $wrapper (restored to the 32-bit stack)"
+        else
+            warn "no saved 32-bit wrapper at $backup; launcher left as is"
+        fi
+    fi
+}
+
+cmd_on() {
+    require_steam_stopped
+    [ -f "$MOON_DIR/SLSsteam.so.64" ] || die "$MOON_DIR/SLSsteam.so.64 missing — run install.sh first"
+
+    enable_64bit_client
+    swap_in "$MOON_DIR/SLSsteam.so.64" "$SLS_DIR/SLSsteam.so" || die "cannot activate the 64-bit SLSsteam"
+    ok "SLSsteam.so: 64-bit active"
+
+    if [ -f "$CR_DIR/cloud_redirect.so.64" ]; then
+        swap_in "$CR_DIR/cloud_redirect.so.64" "$CR_DIR/cloud_redirect.so" || die "cannot activate 64-bit cloud_redirect.so"
+        [ -f "$CR_DIR/cloud_redirect_cli.64" ] && swap_in "$CR_DIR/cloud_redirect_cli.64" "$CR_DIR/cloud_redirect_cli" || true
+        ok "CloudRedirect: 64-bit active"
+    elif [ "$(elfbits "$CR_DIR/cloud_redirect.so")" = 32 ]; then
+        warn "CloudRedirect staged only as 32-bit; cloud saves will be inactive"
+        dim "rebuild with: install.sh --with-cloudredirect"
+    fi
+
+    write_wrapper on
+    if [ ! -f "$MOON_DIR/netsock64.so" ]; then
+        warn "netsock64.so missing — the P2P cert patch will not be applied"
+    fi
+    printf '\n'
+    ok "64-bit stack active — start Steam from your normal launcher"
+}
+
+cmd_off() {
+    require_steam_stopped
+    disable_64bit_client
+    swap_out "$SLS_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so.32" \
+        && ok "SLSsteam.so: 32-bit restored" \
+        || warn "no saved 32-bit SLSsteam.so; left as is"
+    if [ -f "$CR_DIR/cloud_redirect.so.32" ]; then
+        swap_out "$CR_DIR/cloud_redirect.so" "$CR_DIR/cloud_redirect.so.32" && ok "CloudRedirect: 32-bit restored" || true
+        [ -f "$CR_DIR/cloud_redirect_cli.32" ] && swap_out "$CR_DIR/cloud_redirect_cli" "$CR_DIR/cloud_redirect_cli.32" || true
+    fi
+    write_wrapper off
+    printf '\n'
+    ok "32-bit stack active — start Steam from your normal launcher"
+}
+
+cmd_status() {
+    local on=0 r
+    printf '%s\n' "-- client --"
+    for r in "${STEAM_ROOTS[@]}"; do
+        [ -d "$r" ] || continue
+        [ -e "$r/.steam-enable-steamrt64-client" ] && { on=1; dim "${r#$HOME/}: steamrt64 enabled"; }
+        [ -e "$r/.steam-disable-steamrt64-client" ] && dim "${r#$HOME/}: steamrt64 disabled"
+    done
+    [ "$on" = 1 ] && ok "64-bit client selected" || ok "32-bit client selected"
+
+    printf '%s\n' "-- active libraries --"
+    local pair name active staged bits
+    for pair in "$SLS_DIR/SLSsteam.so:$MOON_DIR/SLSsteam.so.64" \
+                "$CR_DIR/cloud_redirect.so:$CR_DIR/cloud_redirect.so.64" \
+                "$CR_DIR/cloud_redirect_cli:$CR_DIR/cloud_redirect_cli.64" \
+                "$MOON_DIR/netsock64.so:"; do
+        active="${pair%%:*}"; staged="${pair#*:}"
+        name="$(basename "$active")"
+        bits="$(elfbits "$active")"
+        if [ -n "$bits" ]; then
+            dim "$name: ${bits}-bit active$( [ -n "$staged" ] && [ -f "$staged" ] && printf ', 64-bit staged' )"
+        else
+            dim "$name: missing"
+        fi
+    done
+
+    printf '%s\n' "-- steam --"
+    steam_running && ok "running (pid $(cat "$HOME/.steam/steam.pid" 2>/dev/null))" || ok "not running"
+}
+
+cmd_doctor() {
+    local problems=0 sls staged crbits
+    printf '%s\n' "-- 64-bit readiness --"
+    if [ ! -x "$HOME/.local/share/Steam/steamrt64/steam" ]; then bad "steamrt64 client binary missing"; problems=$((problems+1)); else ok "steamrt64 client present"; fi
+    if [ ! -f "$HOME/.local/share/Steam/steamrt64/steamclient.so" ]; then bad "steamrt64/steamclient.so missing"; problems=$((problems+1)); else ok "steamrt64/steamclient.so present"; fi
+
+    sls="$(elfbits "$SLS_DIR/SLSsteam.so")"
+    staged="$(elfbits "$MOON_DIR/SLSsteam.so.64")"
+    if [ "$sls" = 64 ]; then
+        ok "SLSsteam.so is 64-bit (active)"
+    elif [ "$staged" = 64 ]; then
+        ok "SLSsteam.so 64-bit staged — run 'moon64 on'"
+    else
+        bad "no 64-bit SLSsteam: active=${sls:-missing} staged=${staged:-missing}"; problems=$((problems+1))
+    fi
+
+    [ -f "$MOON_DIR/netsock64.so" ] \
+        && ok "netsock64.so present" \
+        || warn "netsock64.so missing — the P2P cert patch would not be applied"
+
+    crbits="$(elfbits "$CR_DIR/cloud_redirect.so")"
+    if [ "$crbits" = 64 ]; then
+        ok "CloudRedirect hook is 64-bit (active)"
+    elif [ "$(elfbits "$CR_DIR/cloud_redirect.so.64")" = 64 ]; then
+        warn "CloudRedirect 64-bit staged but not active"
+    elif [ -n "$crbits" ]; then
+        warn "CloudRedirect hook is ${crbits}-bit — cloud saves will be inactive on 64-bit"
+    fi
+
+    printf '%s\n' "-- known 64-bit limits --"
+    dim "library-inject.so (the libcurl redirect shim) has no 64-bit build. The"
+    dim "64-bit client loads libcurl from its own runtime, so it is not needed."
+    dim "\$SLSDIR/lib32 (32-bit libcrypto workaround) is likewise dropped."
+
+    if [ "$problems" = 0 ]; then ok "no blocking problems"; else bad "$problems blocking problem(s)"; fi
+    return "$problems"
+}
+
+usage() {
+    cat <<EOF
+moon64 — 64-bit Steam client switcher for the Luna/LuaTools stack
+
+  moon64 on         activate the 64-bit steamrt64 client + 64-bit libraries
+  moon64 off        restore the 32-bit ubuntu12_32 stack
+  moon64 status     staged vs active components, and the selected client
+  moon64 doctor     check whether the 64-bit path can work, and why not
+
+install.sh stages everything; 'on' and 'off' only swap files already on disk.
+EOF
+}
+
+case "${1:-}" in
+    on)     cmd_on ;;
+    off)    cmd_off ;;
+    status) cmd_status ;;
+    doctor) cmd_doctor ;;
+    ''|-h|--help|help) usage ;;
+    *) bad "unknown command: $1"; usage; exit 2 ;;
+esac
