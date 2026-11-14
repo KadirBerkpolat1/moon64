@@ -4,7 +4,8 @@
 # Why a switcher rather than just a wrapper: the 32-bit stack — SLSsteam.so,
 # library-inject.so, cloud_redirect.so — is ELFCLASS32 and cannot be loaded into
 # a 64-bit client. Switching clients is therefore all-or-nothing, and this is
-# the single place that decides which side is active.
+# the single place that decides which side is active (including client markers
+# and ~/.config/environment.d/steam-32bit.conf).
 #
 #   moon64 on      64-bit client + 64-bit SLSsteam + netsock64 (P2P cert patch)
 #   moon64 off     the previous 32-bit stack, byte-for-byte restored
@@ -12,12 +13,16 @@
 #   moon64 doctor  whether the 64-bit path can work right now, and why not
 #
 # `on` and `off` only swap files that install.sh already staged: recovery never
-# needs the network.
+# needs the network. Both commands execute two-phase (stage + verify ELF class
+# under $MOON_DIR/staged/, then atomic commit with saved originals and a
+# rollback trap).
 set -uo pipefail
 
 MOON_DIR="${MOON64_DIR:-$HOME/.local/share/moon64}"
 SLS_DIR="$HOME/.local/share/SLSsteam"
 CR_DIR="$HOME/.local/share/CloudRedirect"
+ENV_CONF="${MOON64_ENV_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/steam-32bit.conf}"
+STAGE_DIR="$MOON_DIR/staged"
 STEAM_ROOTS=("$HOME/.steam/steam" "$HOME/.local/share/Steam" "$HOME/.steam/debian-installation")
 
 c_red=$'\033[38;5;203m'; c_grn=$'\033[38;5;114m'; c_yel=$'\033[38;5;221m'
@@ -31,6 +36,10 @@ die()  { bad "$*"; exit 1; }
 
 elfbits() { [ -f "$1" ] && file -b "$1" 2>/dev/null | sed -n 's/^ELF \(64\|32\)-bit.*/\1/p'; }
 
+require_file_cmd() {
+    command -v file >/dev/null 2>&1 || die "file is required"
+}
+
 steam_running() {
     local pid
     pid="$(cat "$HOME/.steam/steam.pid" 2>/dev/null || true)"
@@ -42,6 +51,56 @@ require_steam_stopped() {
     return 0
 }
 
+env_conf_value() {
+    [ -f "$ENV_CONF" ] || return 0
+    sed -n 's/^[[:space:]]*STEAM_FORCE_CLIENT[[:space:]]*=[[:space:]]*//p' "$ENV_CONF" \
+        | tail -n1 | tr -d "\"' \r"
+}
+
+sync_systemd_env() {
+    local val="${1:-}"
+    command -v systemctl >/dev/null 2>&1 || return 0
+    if [ -n "$val" ]; then
+        systemctl --user set-environment "STEAM_FORCE_CLIENT=$val" >/dev/null 2>&1 || true
+    else
+        systemctl --user unset-environment STEAM_FORCE_CLIENT >/dev/null 2>&1 || true
+    fi
+}
+
+# Migrate legacy .32.bak CloudRedirect backups from older build-cloudredirect.sh runs.
+migrate_cr_backups() {
+    local f
+    for f in cloud_redirect.so cloud_redirect_cli; do
+        if [ -f "$CR_DIR/$f.32.bak" ]; then
+            if [ ! -f "$CR_DIR/$f.32" ]; then
+                mv -f "$CR_DIR/$f.32.bak" "$CR_DIR/$f.32" || die "cannot migrate $CR_DIR/$f.32.bak"
+                dim "migrated $f.32.bak -> $f.32"
+            elif cmp -s "$CR_DIR/$f.32.bak" "$CR_DIR/$f.32"; then
+                rm -f "$CR_DIR/$f.32.bak"
+            fi
+        fi
+    done
+}
+
+# --- atomic file helpers ---------------------------------------------------
+atomic_install() {
+    local mode="$1" src="$2" dst="$3" dir tmp
+    dir="$(dirname "$dst")"
+    mkdir -p "$dir" || return 1
+    tmp="$dir/.$(basename "$dst").moon64-tmp.$$"
+    install -m "$mode" "$src" "$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+    mv -f "$tmp" "$dst" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+}
+
+atomic_copy_preserve() {
+    local src="$1" dst="$2" dir tmp
+    dir="$(dirname "$dst")"
+    mkdir -p "$dir" || return 1
+    tmp="$dir/.$(basename "$dst").moon64-tmp.$$"
+    cp -a "$src" "$tmp" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+    mv -f "$tmp" "$dst" || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+}
+
 # --- client selection ------------------------------------------------------
 # steam.sh decides the client from these switches. Both must agree; leaving one
 # behind is how a stack ends up half-migrated.
@@ -49,8 +108,8 @@ enable_64bit_client() {
     local r
     for r in "${STEAM_ROOTS[@]}"; do
         [ -d "$r" ] || continue
-        : > "$r/.steam-enable-steamrt64-client" 2>/dev/null || true
-        rm -f "$r/.steam-disable-steamrt64-client" 2>/dev/null || true
+        : > "$r/.steam-enable-steamrt64-client" || return 1
+        rm -f "$r/.steam-disable-steamrt64-client" || return 1
     done
 }
 
@@ -58,105 +117,401 @@ disable_64bit_client() {
     local r
     for r in "${STEAM_ROOTS[@]}"; do
         [ -d "$r" ] || continue
-        rm -f "$r/.steam-enable-steamrt64-client" 2>/dev/null || true
-        : > "$r/.steam-disable-steamrt64-client" 2>/dev/null || true
+        rm -f "$r/.steam-enable-steamrt64-client" || return 1
+        : > "$r/.steam-disable-steamrt64-client" || return 1
     done
 }
 
-# --- file swaps ------------------------------------------------------------
-# swap_in <staged> <active> : move the staged file into place, keeping whatever
-# was active as <active>.32 the first time so `off` is exact.
-swap_in() {
-    local staged="$1" active="$2" saved="$2.32"
-    [ -f "$staged" ] || return 1
-    mkdir -p "$(dirname "$active")" || die "cannot create $(dirname "$active")"
-    if [ -f "$active" ] && [ ! -f "$saved" ] && [ "$(elfbits "$active")" != 64 ]; then
-        cp -a "$active" "$saved" || die "cannot save $active"
-    fi
-    install -m 755 "$staged" "$active" || die "cannot install $staged"
-    return 0
-}
+# --- two-phase transaction rollback ----------------------------------------
+TX_ACTIVE=0
+TX_RB_DIR=""
 
-swap_out() {
-    local active="$1" saved="$2"
-    [ -f "$saved" ] || return 1
-    install -m 755 "$saved" "$active" || die "cannot restore $active"
-    return 0
-}
-
-# --- wrapper ---------------------------------------------------------------
-write_wrapper() {
-    local mode="$1" wrapper="$SLS_DIR/path/steam"
-    local backup="$MOON_DIR/wrapper.32.bak"
-    mkdir -p "$MOON_DIR" "$(dirname "$wrapper")" || die "cannot create $(dirname "$wrapper")"
-    if [ "$mode" = on ]; then
-        [ -f "$MOON_DIR/wrapper.64.sh" ] || die "$MOON_DIR/wrapper.64.sh missing — run install.sh"
-        # Save the original launcher only if it is not already ours.
-        if [ -f "$wrapper" ] && [ ! -f "$backup" ] \
-           && ! cmp -s "$wrapper" "$MOON_DIR/wrapper.64.sh"; then
-            cp -a "$wrapper" "$backup" || die "cannot back up $wrapper"
-        fi
-        install -m 755 "$MOON_DIR/wrapper.64.sh" "$wrapper" || die "cannot install the 64-bit wrapper"
-        ok "wrapper: $wrapper (64-bit)"
+snapshot_file() {
+    local live="$1" key="$2"
+    if [ -f "$live" ]; then
+        cp -a "$live" "$TX_RB_DIR/$key" || die "cannot snapshot $live"
     else
-        if [ -f "$backup" ]; then
-            install -m 755 "$backup" "$wrapper" || die "cannot restore the 32-bit wrapper"
-            ok "wrapper: $wrapper (restored to the 32-bit stack)"
-        else
-            warn "no saved 32-bit wrapper at $backup; launcher left as is"
-        fi
+        : > "$TX_RB_DIR/$key.absent" || die "cannot mark $live absent"
     fi
 }
 
-cmd_on() {
-    require_steam_stopped
-    [ -f "$MOON_DIR/SLSsteam.so.64" ] || die "$MOON_DIR/SLSsteam.so.64 missing — run install.sh first"
+restore_snapshot_file() {
+    local key="$1" live="$2"
+    if [ -f "$TX_RB_DIR/$key" ]; then
+        atomic_copy_preserve "$TX_RB_DIR/$key" "$live" || true
+    elif [ -f "$TX_RB_DIR/$key.absent" ]; then
+        rm -f "$live" 2>/dev/null || true
+    fi
+}
 
-    enable_64bit_client
-    swap_in "$MOON_DIR/SLSsteam.so.64" "$SLS_DIR/SLSsteam.so" || die "cannot activate the 64-bit SLSsteam"
-    ok "SLSsteam.so: 64-bit active"
+snapshot_roots() {
+    local i=0 r
+    mkdir -p "$TX_RB_DIR/roots" || die "cannot create $TX_RB_DIR/roots"
+    for r in "${STEAM_ROOTS[@]}"; do
+        [ -d "$r" ] || { i=$((i+1)); continue; }
+        [ -e "$r/.steam-enable-steamrt64-client" ] && : > "$TX_RB_DIR/roots/$i.en" || true
+        [ -e "$r/.steam-disable-steamrt64-client" ] && : > "$TX_RB_DIR/roots/$i.dis" || true
+        i=$((i+1))
+    done
+}
+
+restore_roots() {
+    local i=0 r
+    for r in "${STEAM_ROOTS[@]}"; do
+        [ -d "$r" ] || { i=$((i+1)); continue; }
+        if [ -e "$TX_RB_DIR/roots/$i.en" ]; then
+            : > "$r/.steam-enable-steamrt64-client" 2>/dev/null || true
+        else
+            rm -f "$r/.steam-enable-steamrt64-client" 2>/dev/null || true
+        fi
+        if [ -e "$TX_RB_DIR/roots/$i.dis" ]; then
+            : > "$r/.steam-disable-steamrt64-client" 2>/dev/null || true
+        else
+            rm -f "$r/.steam-disable-steamrt64-client" 2>/dev/null || true
+        fi
+        i=$((i+1))
+    done
+}
+
+tx_rollback() {
+    [ -n "$TX_RB_DIR" ] && [ -d "$TX_RB_DIR" ] || return 0
+    warn "rolling back partial switch..."
+    restore_snapshot_file "sls" "$SLS_DIR/SLSsteam.so"
+    restore_snapshot_file "cr_so" "$CR_DIR/cloud_redirect.so"
+    restore_snapshot_file "cr_cli" "$CR_DIR/cloud_redirect_cli"
+    restore_snapshot_file "wrapper" "$SLS_DIR/path/steam"
+    restore_snapshot_file "env_conf" "$ENV_CONF"
+    restore_roots
+    sync_systemd_env "$(env_conf_value)"
+}
+
+tx_cleanup() {
+    rm -rf "$STAGE_DIR" 2>/dev/null || true
+}
+
+tx_exit() {
+    local rc=$?
+    if [ "$TX_ACTIVE" = 1 ]; then
+        TX_ACTIVE=0
+        tx_rollback
+    fi
+    tx_cleanup
+    exit "$rc"
+}
+
+tx_abort() {
+    local sig="$1"
+    if [ "$TX_ACTIVE" = 1 ]; then
+        TX_ACTIVE=0
+        tx_rollback
+        bad "interrupted ($sig) — rolled back"
+    fi
+    tx_cleanup
+    trap - INT TERM HUP EXIT
+    exit 130
+}
+
+tx_begin_stage() {
+    rm -rf "$STAGE_DIR" || die "cannot clean $STAGE_DIR"
+    mkdir -p "$STAGE_DIR/rollback" || die "cannot create $STAGE_DIR"
+    TX_RB_DIR="$STAGE_DIR/rollback"
+    TX_ACTIVE=0
+    trap 'tx_exit' EXIT
+    trap 'tx_abort INT' INT
+    trap 'tx_abort TERM' TERM
+    trap 'tx_abort HUP' HUP
+}
+
+tx_commit_done() {
+    TX_ACTIVE=0
+    trap - INT TERM HUP EXIT
+    tx_cleanup
+}
+
+# --- save originals before Phase 2 commit ----------------------------------
+save_original_lib() {
+    local active="$1" saved="$2"
+    if [ -f "$active" ] && [ ! -f "$saved" ] && [ "$(elfbits "$active")" != 64 ]; then
+        atomic_copy_preserve "$active" "$saved" || die "cannot save $active"
+    fi
+}
+
+# --- commands --------------------------------------------------------------
+cmd_on() {
+    local wrapper="$SLS_DIR/path/steam"
+    local wrapper_bak="$MOON_DIR/wrapper.32.bak"
+    local env_saved="$MOON_DIR/steam-32bit.conf.32"
+    local env_absent="$MOON_DIR/steam-32bit.conf.absent"
+    local stage_cr=0 stage_cr_cli=0
+
+    require_steam_stopped
+    require_file_cmd
+    migrate_cr_backups
+
+    [ -f "$MOON_DIR/SLSsteam.so.64" ] || die "$MOON_DIR/SLSsteam.so.64 missing — run install.sh first"
+    [ -f "$MOON_DIR/wrapper.64.sh" ] || die "$MOON_DIR/wrapper.64.sh missing — run install.sh"
+
+    # --- Phase 1: stage & verify under $MOON_DIR/staged/ -------------------
+    tx_begin_stage
+
+    [ "$(elfbits "$MOON_DIR/SLSsteam.so.64")" = 64 ] || die "$MOON_DIR/SLSsteam.so.64 is not ELF 64-bit"
+    install -m 755 "$MOON_DIR/SLSsteam.so.64" "$STAGE_DIR/SLSsteam.so" || die "cannot stage SLSsteam.so"
+    [ "$(elfbits "$STAGE_DIR/SLSsteam.so")" = 64 ] || die "staged SLSsteam.so failed ELF 64-bit check"
+    cmp -s "$MOON_DIR/SLSsteam.so.64" "$STAGE_DIR/SLSsteam.so" || die "staged SLSsteam.so verification mismatch"
 
     if [ -f "$CR_DIR/cloud_redirect.so.64" ]; then
-        swap_in "$CR_DIR/cloud_redirect.so.64" "$CR_DIR/cloud_redirect.so" || die "cannot activate 64-bit cloud_redirect.so"
-        [ -f "$CR_DIR/cloud_redirect_cli.64" ] && swap_in "$CR_DIR/cloud_redirect_cli.64" "$CR_DIR/cloud_redirect_cli" || true
+        [ "$(elfbits "$CR_DIR/cloud_redirect.so.64")" = 64 ] || die "$CR_DIR/cloud_redirect.so.64 is not ELF 64-bit"
+        install -m 755 "$CR_DIR/cloud_redirect.so.64" "$STAGE_DIR/cloud_redirect.so" || die "cannot stage cloud_redirect.so"
+        [ "$(elfbits "$STAGE_DIR/cloud_redirect.so")" = 64 ] || die "staged cloud_redirect.so failed ELF 64-bit check"
+        stage_cr=1
+        if [ -f "$CR_DIR/cloud_redirect_cli.64" ]; then
+            [ "$(elfbits "$CR_DIR/cloud_redirect_cli.64")" = 64 ] || die "$CR_DIR/cloud_redirect_cli.64 is not ELF 64-bit"
+            install -m 755 "$CR_DIR/cloud_redirect_cli.64" "$STAGE_DIR/cloud_redirect_cli" || die "cannot stage cloud_redirect_cli"
+            [ "$(elfbits "$STAGE_DIR/cloud_redirect_cli")" = 64 ] || die "staged cloud_redirect_cli failed ELF 64-bit check"
+            stage_cr_cli=1
+        fi
+    fi
+
+    [ -s "$MOON_DIR/wrapper.64.sh" ] || die "$MOON_DIR/wrapper.64.sh is empty"
+    install -m 755 "$MOON_DIR/wrapper.64.sh" "$STAGE_DIR/wrapper" || die "cannot stage wrapper"
+
+    cat > "$STAGE_DIR/steam-32bit.conf" <<'CONF' || die "cannot stage steam-32bit.conf"
+# Managed by moon64 — 64-bit steamrt64 client active (run 'moon64 off' to restore 32-bit).
+STEAM_FORCE_CLIENT=steamrt64
+CONF
+
+    # Save 32-bit originals onto disk BEFORE Phase 2 mutates any active file.
+    mkdir -p "$MOON_DIR" "$SLS_DIR" "$(dirname "$wrapper")" || die "cannot create target directories"
+    save_original_lib "$SLS_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so.32"
+    if [ "$stage_cr" = 1 ]; then
+        save_original_lib "$CR_DIR/cloud_redirect.so" "$CR_DIR/cloud_redirect.so.32"
+        [ "$stage_cr_cli" = 1 ] && save_original_lib "$CR_DIR/cloud_redirect_cli" "$CR_DIR/cloud_redirect_cli.32"
+    fi
+    if [ -f "$wrapper" ] && [ ! -f "$wrapper_bak" ] && ! cmp -s "$wrapper" "$MOON_DIR/wrapper.64.sh"; then
+        atomic_copy_preserve "$wrapper" "$wrapper_bak" || die "cannot back up $wrapper"
+    fi
+    if [ -f "$ENV_CONF" ]; then
+        if [ ! -f "$env_saved" ] && [ ! -f "$env_absent" ] && [ "$(env_conf_value)" != "steamrt64" ]; then
+            atomic_copy_preserve "$ENV_CONF" "$env_saved" || die "cannot back up $ENV_CONF"
+        fi
+    elif [ ! -f "$env_saved" ] && [ ! -f "$env_absent" ]; then
+        : > "$env_absent" || die "cannot mark $ENV_CONF absent"
+    fi
+
+    # Snapshot exact pre-commit live state for rollback if Phase 2 fails/aborts.
+    snapshot_file "$SLS_DIR/SLSsteam.so" "sls"
+    snapshot_file "$CR_DIR/cloud_redirect.so" "cr_so"
+    snapshot_file "$CR_DIR/cloud_redirect_cli" "cr_cli"
+    snapshot_file "$wrapper" "wrapper"
+    snapshot_file "$ENV_CONF" "env_conf"
+    snapshot_roots
+
+    # --- Phase 2: atomic commit --------------------------------------------
+    TX_ACTIVE=1
+
+    atomic_install 755 "$STAGE_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so" || die "cannot activate 64-bit SLSsteam.so"
+    if [ "$stage_cr" = 1 ]; then
+        atomic_install 755 "$STAGE_DIR/cloud_redirect.so" "$CR_DIR/cloud_redirect.so" || die "cannot activate 64-bit cloud_redirect.so"
+        if [ "$stage_cr_cli" = 1 ]; then
+            atomic_install 755 "$STAGE_DIR/cloud_redirect_cli" "$CR_DIR/cloud_redirect_cli" || die "cannot activate 64-bit cloud_redirect_cli"
+        fi
+    fi
+    atomic_install 755 "$STAGE_DIR/wrapper" "$wrapper" || die "cannot install 64-bit wrapper"
+    atomic_install 644 "$STAGE_DIR/steam-32bit.conf" "$ENV_CONF" || die "cannot update $ENV_CONF"
+    enable_64bit_client || die "cannot write steamrt64 client markers"
+    sync_systemd_env "steamrt64"
+
+    # Post-commit ELF verification
+    [ "$(elfbits "$SLS_DIR/SLSsteam.so")" = 64 ] || die "post-commit check: SLSsteam.so is not 64-bit"
+    if [ "$stage_cr" = 1 ]; then
+        [ "$(elfbits "$CR_DIR/cloud_redirect.so")" = 64 ] || die "post-commit check: cloud_redirect.so is not 64-bit"
+        if [ "$stage_cr_cli" = 1 ]; then
+            [ "$(elfbits "$CR_DIR/cloud_redirect_cli")" = 64 ] || die "post-commit check: cloud_redirect_cli is not 64-bit"
+        fi
+    fi
+
+    tx_commit_done
+
+    ok "SLSsteam.so: 64-bit active"
+    if [ "$stage_cr" = 1 ]; then
         ok "CloudRedirect: 64-bit active"
     elif [ "$(elfbits "$CR_DIR/cloud_redirect.so")" = 32 ]; then
         warn "CloudRedirect staged only as 32-bit; cloud saves will be inactive"
         dim "rebuild with: install.sh --with-cloudredirect"
     fi
-
-    write_wrapper on
+    ok "wrapper: $wrapper (64-bit)"
+    ok "environment.d: $ENV_CONF (STEAM_FORCE_CLIENT=steamrt64)"
     if [ ! -f "$MOON_DIR/netsock64.so" ]; then
         warn "netsock64.so missing — the P2P cert patch will not be applied"
+    fi
+    if [ "${STEAM_FORCE_CLIENT:-}" = "ubuntu12_32" ]; then
+        warn "this shell still exports STEAM_FORCE_CLIENT=ubuntu12_32; unset it before launching steam.sh directly"
     fi
     printf '\n'
     ok "64-bit stack active — start Steam from your normal launcher"
 }
 
 cmd_off() {
+    local wrapper="$SLS_DIR/path/steam"
+    local wrapper_bak="$MOON_DIR/wrapper.32.bak"
+    local env_saved="$MOON_DIR/steam-32bit.conf.32"
+    local env_absent="$MOON_DIR/steam-32bit.conf.absent"
+    local stage_sls=0 stage_cr=0 stage_cr_cli=0 stage_wrap=0
+    local env_action="keep"
+
     require_steam_stopped
-    disable_64bit_client
-    swap_out "$SLS_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so.32" \
-        && ok "SLSsteam.so: 32-bit restored" \
-        || warn "no saved 32-bit SLSsteam.so; left as is"
-    if [ -f "$CR_DIR/cloud_redirect.so.32" ]; then
-        swap_out "$CR_DIR/cloud_redirect.so" "$CR_DIR/cloud_redirect.so.32" && ok "CloudRedirect: 32-bit restored" || true
-        [ -f "$CR_DIR/cloud_redirect_cli.32" ] && swap_out "$CR_DIR/cloud_redirect_cli" "$CR_DIR/cloud_redirect_cli.32" || true
+    require_file_cmd
+    migrate_cr_backups
+
+    # --- Phase 1: stage & verify 32-bit originals under $MOON_DIR/staged/ --
+    tx_begin_stage
+
+    if [ -f "$SLS_DIR/SLSsteam.so.32" ]; then
+        [ "$(elfbits "$SLS_DIR/SLSsteam.so.32")" = 32 ] || die "$SLS_DIR/SLSsteam.so.32 is not ELF 32-bit"
+        cp -a "$SLS_DIR/SLSsteam.so.32" "$STAGE_DIR/SLSsteam.so" || die "cannot stage 32-bit SLSsteam.so"
+        [ "$(elfbits "$STAGE_DIR/SLSsteam.so")" = 32 ] || die "staged SLSsteam.so failed ELF 32-bit check"
+        cmp -s "$STAGE_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so.32" || die "staged SLSsteam.so byte mismatch"
+        stage_sls=1
+    elif [ "$(elfbits "$SLS_DIR/SLSsteam.so")" = 64 ]; then
+        die "cannot restore 32-bit stack: $SLS_DIR/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit"
     fi
-    write_wrapper off
+
+    if [ -f "$CR_DIR/cloud_redirect.so.32" ]; then
+        [ "$(elfbits "$CR_DIR/cloud_redirect.so.32")" = 32 ] || die "$CR_DIR/cloud_redirect.so.32 is not ELF 32-bit"
+        cp -a "$CR_DIR/cloud_redirect.so.32" "$STAGE_DIR/cloud_redirect.so" || die "cannot stage 32-bit cloud_redirect.so"
+        [ "$(elfbits "$STAGE_DIR/cloud_redirect.so")" = 32 ] || die "staged cloud_redirect.so failed ELF 32-bit check"
+        cmp -s "$STAGE_DIR/cloud_redirect.so" "$CR_DIR/cloud_redirect.so.32" || die "staged cloud_redirect.so byte mismatch"
+        stage_cr=1
+    fi
+    if [ -f "$CR_DIR/cloud_redirect_cli.32" ]; then
+        [ "$(elfbits "$CR_DIR/cloud_redirect_cli.32")" = 32 ] || die "$CR_DIR/cloud_redirect_cli.32 is not ELF 32-bit"
+        cp -a "$CR_DIR/cloud_redirect_cli.32" "$STAGE_DIR/cloud_redirect_cli" || die "cannot stage 32-bit cloud_redirect_cli"
+        [ "$(elfbits "$STAGE_DIR/cloud_redirect_cli")" = 32 ] || die "staged cloud_redirect_cli failed ELF 32-bit check"
+        cmp -s "$STAGE_DIR/cloud_redirect_cli" "$CR_DIR/cloud_redirect_cli.32" || die "staged cloud_redirect_cli byte mismatch"
+        stage_cr_cli=1
+    fi
+
+    if [ -f "$wrapper_bak" ]; then
+        cp -a "$wrapper_bak" "$STAGE_DIR/wrapper" || die "cannot stage 32-bit wrapper"
+        cmp -s "$STAGE_DIR/wrapper" "$wrapper_bak" || die "staged wrapper byte mismatch"
+        stage_wrap=1
+    fi
+
+    if [ -f "$env_saved" ]; then
+        cp -a "$env_saved" "$STAGE_DIR/steam-32bit.conf" || die "cannot stage saved $ENV_CONF"
+        cmp -s "$STAGE_DIR/steam-32bit.conf" "$env_saved" || die "staged steam-32bit.conf byte mismatch"
+        env_action="restore"
+    elif [ -f "$env_absent" ]; then
+        env_action="remove"
+    elif [ -f "$ENV_CONF" ] && [ "$(env_conf_value)" = "steamrt64" ]; then
+        cat > "$STAGE_DIR/steam-32bit.conf" <<'CONF' || die "cannot stage fallback steam-32bit.conf"
+# Restored to 32-bit ubuntu12_32 by moon64 off.
+STEAM_FORCE_CLIENT=ubuntu12_32
+CONF
+        env_action="fallback"
+    fi
+
+    # Snapshot current live state for rollback if Phase 2 fails/aborts.
+    snapshot_file "$SLS_DIR/SLSsteam.so" "sls"
+    snapshot_file "$CR_DIR/cloud_redirect.so" "cr_so"
+    snapshot_file "$CR_DIR/cloud_redirect_cli" "cr_cli"
+    snapshot_file "$wrapper" "wrapper"
+    snapshot_file "$ENV_CONF" "env_conf"
+    snapshot_roots
+
+    # --- Phase 2: atomic commit + byte-exact verification ------------------
+    TX_ACTIVE=1
+
+    if [ "$stage_sls" = 1 ]; then
+        atomic_copy_preserve "$STAGE_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so" || die "cannot restore SLSsteam.so"
+        cmp -s "$SLS_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so.32" || die "SLSsteam.so byte-exact check failed"
+        [ "$(elfbits "$SLS_DIR/SLSsteam.so")" = 32 ] || die "SLSsteam.so is not 32-bit after restore"
+    fi
+    if [ "$stage_cr" = 1 ]; then
+        atomic_copy_preserve "$STAGE_DIR/cloud_redirect.so" "$CR_DIR/cloud_redirect.so" || die "cannot restore cloud_redirect.so"
+        cmp -s "$CR_DIR/cloud_redirect.so" "$CR_DIR/cloud_redirect.so.32" || die "cloud_redirect.so byte-exact check failed"
+        [ "$(elfbits "$CR_DIR/cloud_redirect.so")" = 32 ] || die "cloud_redirect.so is not 32-bit after restore"
+    fi
+    if [ "$stage_cr_cli" = 1 ]; then
+        atomic_copy_preserve "$STAGE_DIR/cloud_redirect_cli" "$CR_DIR/cloud_redirect_cli" || die "cannot restore cloud_redirect_cli"
+        cmp -s "$CR_DIR/cloud_redirect_cli" "$CR_DIR/cloud_redirect_cli.32" || die "cloud_redirect_cli byte-exact check failed"
+        [ "$(elfbits "$CR_DIR/cloud_redirect_cli")" = 32 ] || die "cloud_redirect_cli is not 32-bit after restore"
+    fi
+    if [ "$stage_wrap" = 1 ]; then
+        atomic_copy_preserve "$STAGE_DIR/wrapper" "$wrapper" || die "cannot restore wrapper"
+        cmp -s "$wrapper" "$wrapper_bak" || die "wrapper byte-exact check failed"
+    fi
+    case "$env_action" in
+        restore)
+            atomic_copy_preserve "$STAGE_DIR/steam-32bit.conf" "$ENV_CONF" || die "cannot restore $ENV_CONF"
+            cmp -s "$ENV_CONF" "$env_saved" || die "$ENV_CONF byte-exact check failed"
+            sync_systemd_env "$(env_conf_value)"
+            ;;
+        remove)
+            rm -f "$ENV_CONF" || die "cannot remove $ENV_CONF"
+            sync_systemd_env ""
+            ;;
+        fallback)
+            atomic_install 644 "$STAGE_DIR/steam-32bit.conf" "$ENV_CONF" || die "cannot reset $ENV_CONF"
+            sync_systemd_env "ubuntu12_32"
+            ;;
+    esac
+
+    disable_64bit_client || die "cannot restore 32-bit client markers"
+    tx_commit_done
+
+    if [ "$stage_sls" = 1 ]; then
+        ok "SLSsteam.so: 32-bit restored (byte-exact)"
+    else
+        warn "no saved 32-bit SLSsteam.so; left as is"
+    fi
+    if [ "$stage_cr" = 1 ]; then
+        ok "CloudRedirect: 32-bit restored (byte-exact)"
+    elif [ "$(elfbits "$CR_DIR/cloud_redirect.so")" = 64 ]; then
+        warn "cloud_redirect.so is 64-bit with no .32 backup; rebuild/reinstall 32-bit CloudRedirect"
+    fi
+    if [ "$stage_wrap" = 1 ]; then
+        ok "wrapper: $wrapper (restored byte-exact to 32-bit stack)"
+    else
+        warn "no saved 32-bit wrapper at $wrapper_bak; launcher left as is"
+    fi
+    case "$env_action" in
+        restore)  ok "environment.d: $ENV_CONF restored (byte-exact)" ;;
+        remove)   ok "environment.d: $ENV_CONF removed (was absent before 'moon64 on')" ;;
+        fallback) ok "environment.d: $ENV_CONF reset to STEAM_FORCE_CLIENT=ubuntu12_32" ;;
+    esac
     printf '\n'
     ok "32-bit stack active — start Steam from your normal launcher"
 }
 
 cmd_status() {
-    local on=0 r
+    local on=0 r env_val
     printf '%s\n' "-- client --"
     for r in "${STEAM_ROOTS[@]}"; do
         [ -d "$r" ] || continue
-        [ -e "$r/.steam-enable-steamrt64-client" ] && { on=1; dim "${r#$HOME/}: steamrt64 enabled"; }
-        [ -e "$r/.steam-disable-steamrt64-client" ] && dim "${r#$HOME/}: steamrt64 disabled"
+        [ -e "$r/.steam-enable-steamrt64-client" ] && { on=1; dim "${r#"$HOME"/}: steamrt64 enabled"; }
+        [ -e "$r/.steam-disable-steamrt64-client" ] && dim "${r#"$HOME"/}: steamrt64 disabled"
     done
-    [ "$on" = 1 ] && ok "64-bit client selected" || ok "32-bit client selected"
+    if [ "$on" = 1 ]; then
+        ok "64-bit client selected"
+    else
+        ok "32-bit client selected"
+    fi
+
+    env_val="$(env_conf_value)"
+    if [ -n "$env_val" ]; then
+        dim "environment.d: STEAM_FORCE_CLIENT=$env_val (${ENV_CONF#"$HOME"/})"
+    elif [ -f "$ENV_CONF" ]; then
+        dim "environment.d: present without STEAM_FORCE_CLIENT (${ENV_CONF#"$HOME"/})"
+    else
+        dim "environment.d: ${ENV_CONF#"$HOME"/} absent"
+    fi
+    if [ -n "${STEAM_FORCE_CLIENT:-}" ]; then
+        if { [ "$on" = 1 ] && [ "$STEAM_FORCE_CLIENT" != "steamrt64" ]; } \
+           || { [ "$on" = 0 ] && [ "$STEAM_FORCE_CLIENT" = "steamrt64" ]; }; then
+            warn "current shell exports STEAM_FORCE_CLIENT=$STEAM_FORCE_CLIENT"
+        fi
+    fi
 
     printf '%s\n' "-- active libraries --"
     local pair name active staged bits
@@ -175,11 +530,48 @@ cmd_status() {
     done
 
     printf '%s\n' "-- steam --"
-    steam_running && ok "running (pid $(cat "$HOME/.steam/steam.pid" 2>/dev/null))" || ok "not running"
+    if steam_running; then
+        ok "running (pid $(cat "$HOME/.steam/steam.pid" 2>/dev/null))"
+    else
+        ok "not running"
+    fi
+}
+
+check_slssteam_runtime_deps() {
+    local so="$1" needed ldd_out dep missing_libs=""
+    command -v readelf >/dev/null 2>&1 && command -v ldd >/dev/null 2>&1 || return 0
+    needed="$(LC_ALL=C readelf -d "$so" 2>/dev/null \
+        | sed -n 's/.*(NEEDED).*Shared library: \[\([^]]*\)\].*/\1/p')"
+    ldd_out="$(LC_ALL=C env -u LD_LIBRARY_PATH -u LD_AUDIT -u LD_PRELOAD ldd -r "$so" 2>&1 || true)"
+    while IFS= read -r dep; do
+        [ -n "$dep" ] || continue
+        case "$dep" in ld-linux-*.so*) continue ;; esac
+        if printf '%s\n' "$ldd_out" | awk -v d="$dep" '$1 == d && $2 == "=>" && $3 == "not" && $4 == "found" { f=1 } END { exit !f }' \
+           || ! printf '%s\n' "$ldd_out" | awk -v d="$dep" '$1 == d && $2 == "=>" && $3 ~ /^\// { f=1 } END { exit !f }'; then
+            missing_libs="${missing_libs:+$missing_libs, }$dep"
+        fi
+    done <<< "$needed"
+    if [ -n "$missing_libs" ]; then
+        case "$missing_libs" in
+            *libdbus-1.so.3*)
+                bad "SLSsteam.so missing host 64-bit dependency: $missing_libs (install 64-bit libdbus / dbus-libs / libdbus-1-3)"
+                ;;
+            *)
+                bad "SLSsteam.so missing host 64-bit dependency: $missing_libs"
+                ;;
+        esac
+        return 1
+    fi
+    if printf '%s\n' "$ldd_out" | grep -qE 'undefined symbol|version .* not found'; then
+        bad "SLSsteam.so has unresolved symbols/versions on this host"
+        return 1
+    fi
+    ok "SLSsteam.so runtime dependencies resolve on host"
+    return 0
 }
 
 cmd_doctor() {
-    local problems=0 sls staged crbits
+    local problems=0 sls staged crbits dep_target="" env_val
     printf '%s\n' "-- 64-bit readiness --"
     if [ ! -x "$HOME/.local/share/Steam/steamrt64/steam" ]; then bad "steamrt64 client binary missing"; problems=$((problems+1)); else ok "steamrt64 client present"; fi
     if [ ! -f "$HOME/.local/share/Steam/steamrt64/steamclient.so" ]; then bad "steamrt64/steamclient.so missing"; problems=$((problems+1)); else ok "steamrt64/steamclient.so present"; fi
@@ -188,15 +580,23 @@ cmd_doctor() {
     staged="$(elfbits "$MOON_DIR/SLSsteam.so.64")"
     if [ "$sls" = 64 ]; then
         ok "SLSsteam.so is 64-bit (active)"
+        dep_target="$SLS_DIR/SLSsteam.so"
     elif [ "$staged" = 64 ]; then
         ok "SLSsteam.so 64-bit staged — run 'moon64 on'"
+        dep_target="$MOON_DIR/SLSsteam.so.64"
     else
         bad "no 64-bit SLSsteam: active=${sls:-missing} staged=${staged:-missing}"; problems=$((problems+1))
     fi
 
-    [ -f "$MOON_DIR/netsock64.so" ] \
-        && ok "netsock64.so present" \
-        || warn "netsock64.so missing — the P2P cert patch would not be applied"
+    if [ -n "$dep_target" ]; then
+        check_slssteam_runtime_deps "$dep_target" || problems=$((problems+1))
+    fi
+
+    if [ -f "$MOON_DIR/netsock64.so" ]; then
+        ok "netsock64.so present"
+    else
+        warn "netsock64.so missing — the P2P cert patch would not be applied"
+    fi
 
     crbits="$(elfbits "$CR_DIR/cloud_redirect.so")"
     if [ "$crbits" = 64 ]; then
@@ -205,6 +605,16 @@ cmd_doctor() {
         warn "CloudRedirect 64-bit staged but not active"
     elif [ -n "$crbits" ]; then
         warn "CloudRedirect hook is ${crbits}-bit — cloud saves will be inactive on 64-bit"
+    fi
+    if [ -f "$CR_DIR/cloud_redirect.so.32.bak" ] || [ -f "$CR_DIR/cloud_redirect_cli.32.bak" ]; then
+        warn "legacy .32.bak CloudRedirect backup present — 'moon64 on'/'off' will migrate it to .32"
+    fi
+
+    env_val="$(env_conf_value)"
+    if [ "$sls" = 64 ] && [ -n "$env_val" ] && [ "$env_val" != "steamrt64" ]; then
+        warn "$ENV_CONF sets STEAM_FORCE_CLIENT=$env_val while 64-bit SLSsteam is active — run 'moon64 on'"
+    elif [ -n "$env_val" ]; then
+        dim "environment.d: STEAM_FORCE_CLIENT=$env_val"
     fi
 
     printf '%s\n' "-- known 64-bit limits --"

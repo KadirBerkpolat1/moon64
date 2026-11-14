@@ -28,13 +28,29 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <time.h>
 
-#define LOG_FILE "moon64-netsock.log"
 #define PATCH_LEN 6
+
+// Absolute log path.  A relative name would land in whatever cwd the launcher
+// happened to have (Steam's cwd, or a desktop entry's), which is why the
+// documented path and the real file disagreed.  $HOME/.local/share/moon64 is
+// the directory the installer and the switcher already own.
+static char g_log_path[512];
+
+static void log_path_init(void)
+{
+    const char *home = getenv("HOME");
+    if (home && *home)
+        snprintf(g_log_path, sizeof g_log_path,
+                 "%s/.local/share/moon64/moon64-netsock.log", home);
+    else
+        snprintf(g_log_path, sizeof g_log_path, "/tmp/moon64-netsock.log");
+}
 
 // Function entry, linux64/steamclient.so lineage (2026-10-22).
 static const uint8_t ANCHOR_LINUX64[] = {
@@ -56,7 +72,10 @@ static FILE *g_log;
 
 static void logf_(const char *fmt, ...)
 {
-    if (!g_log) g_log = fopen(LOG_FILE, "a");
+    if (!g_log) {
+        if (!g_log_path[0]) log_path_init();
+        g_log = fopen(g_log_path, "a");
+    }
     if (!g_log) return;
     time_t t = time(NULL);
     struct tm tm;
@@ -163,9 +182,25 @@ static void patch_one(const char *name)
           suffix, (void *)target, (unsigned long)((uintptr_t)target - lo));
 }
 
+// The shim is inherited by every process the launcher spawns (steam.sh runs
+// mkdir/ln/readlink before exec'ing the client).  Those helpers never open a
+// steamclient.so, so they cannot patch anything -- but their la_version would
+// still append an "audit loaded" line, turning the log into noise.  Gate the
+// logging on the process actually being the Steam client, the same test
+// SLSsteam uses (process name == "steam").
+static int is_steam_process(void)
+{
+    char buf[64];
+    ssize_t n = readlink("/proc/self/comm", buf, sizeof buf - 1);
+    if (n <= 0) return 0;
+    buf[n] = '\0';
+    return strncmp(buf, "steam", 5) == 0;
+}
+
 unsigned int la_version(unsigned int version)
 {
-    logf_("audit loaded, la_version %u", version);
+    if (is_steam_process())
+        logf_("audit loaded, la_version %u", version);
     return LAV_CURRENT;
 }
 

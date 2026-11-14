@@ -27,7 +27,7 @@ slsm_strip_own_auditors() {
     IFS=:
     for a in ${LD_AUDIT:-}; do
         case "$a" in
-            ''|*SLSsteam.so|*library-inject.so|*netsock64.so|*libSLSsteam.so|*libSLS-library-inject.so) continue ;;
+            ''|*SLSsteam.so|*library-inject.so|*netsock64.so) continue ;;
             *) clean="${clean:+$clean:}$a" ;;
         esac
     done
@@ -37,26 +37,42 @@ slsm_strip_own_auditors() {
 SLSM_INHERITED_AUDIT="$(slsm_strip_own_auditors)"
 if [ -n "$SLSM_INHERITED_AUDIT" ]; then export LD_AUDIT="$SLSM_INHERITED_AUDIT"; else unset LD_AUDIT; fi
 
-# Resolve the real Steam binary, skipping this wrapper itself.
+# Resolve steam.sh in the Steam data root (never this wrapper itself) so
+# steam.sh handles unset STEAM_RUNTIME, create_legacy_entry_points, and
+# MAGIC_RESTART_EXITCODE=42 self-update restarts while keeping our LD_AUDIT stack.
 SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 STEAM_BIN=""
-for c in "$HOME/.local/share/Steam/steamrt64/steam" \
-         "$HOME/.steam/steam/steamrt64/steam" \
-         "$HOME/.steam/debian-installation/steamrt64/steam"; do
-    if [ -x "$c" ] && [ "$(readlink -f "$c")" != "$SELF" ]; then STEAM_BIN="$c"; break; fi
+for r in "$HOME/.local/share/Steam" \
+         "$HOME/.steam/steam" \
+         "$HOME/.steam/debian-installation"; do
+    if [ -x "$r/steam.sh" ] && [ -x "$r/steamrt64/steam" ] \
+       && [ "$(readlink -f "$r/steam.sh" 2>/dev/null || echo "$r/steam.sh")" != "$SELF" ]; then
+        STEAM_BIN="$r/steam.sh"
+        break
+    fi
 done
 if [ -z "$STEAM_BIN" ]; then
-    STEAM_BIN="$(command -v steam 2>/dev/null || true)"
-    [ -n "$STEAM_BIN" ] && [ "$(readlink -f "$STEAM_BIN")" = "$SELF" ] && STEAM_BIN=""
+    for r in "$HOME/.local/share/Steam" \
+             "$HOME/.steam/steam" \
+             "$HOME/.steam/debian-installation"; do
+        if [ -x "$r/steamrt64/steam" ] \
+           && [ "$(readlink -f "$r/steamrt64/steam" 2>/dev/null || echo "$r/steamrt64/steam")" != "$SELF" ]; then
+            STEAM_BIN="$r/steamrt64/steam"
+            log "steam.sh missing; falling back to direct $STEAM_BIN"
+            break
+        fi
+    done
 fi
-[ -n "$STEAM_BIN" ] || { echo "moon64: no steamrt64/steam binary found" >&2; exit 1; }
-log "steam binary: $STEAM_BIN"
+[ -n "$STEAM_BIN" ] || { echo "moon64: no steam.sh or steamrt64/steam binary found" >&2; exit 1; }
+log "steam launcher: $STEAM_BIN"
 
 # Steam must actually pick the 64-bit client; without these it re-execs to scout
 # and none of the 64-bit libraries would load.
 export STEAM_FORCE_CLIENT="steamrt64"
 for r in "$HOME/.steam/steam" "$HOME/.local/share/Steam" "$HOME/.steam/debian-installation"; do
-    [ -d "$r" ] && : > "$r/.steam-enable-steamrt64-client" 2>/dev/null || true
+    [ -d "$r" ] || continue
+    : > "$r/.steam-enable-steamrt64-client" 2>/dev/null || true
+    rm -f "$r/.steam-disable-steamrt64-client" 2>/dev/null || true
 done
 
 # CloudRedirect cloud-save hook (LD_PRELOAD only: loading it as an auditor
@@ -116,4 +132,9 @@ else
     export LD_AUDIT="$AUDIT_LIST"
 fi
 
+# steam.sh also runs helper commands (mkdir, ln, readlink, ldd) before it
+# execs the client, and they inherit this LD_AUDIT.  That is the same shape the
+# 32-bit stack has always had and is safe: SLSsteam's setup() bails on any
+# process whose name is not `steam`, and netsock64 only acts when a
+# steamclient.so is actually opened.  Both helpers therefore no-op.
 exec "$STEAM_BIN" "$@"

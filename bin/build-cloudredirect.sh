@@ -39,9 +39,12 @@ for arg in "$@"; do
     esac
 done
 
-command -v git   >/dev/null || die "git is required"
-command -v cmake >/dev/null || die "cmake is required"
-command -v g++   >/dev/null || die "g++ is required"
+command -v git     >/dev/null || die "git is required"
+command -v cmake   >/dev/null || die "cmake is required"
+command -v g++     >/dev/null || die "g++ is required"
+command -v file    >/dev/null || die "file is required"
+command -v readelf >/dev/null || die "readelf (binutils) is required"
+command -v ldd     >/dev/null || die "ldd is required"
 
 # --- source -----------------------------------------------------------------
 if [ ! -d "$WORK/.git" ]; then
@@ -58,7 +61,7 @@ ok "source at $( cd "$WORK" && git rev-parse --short HEAD )"
 # Drop a stale build tree: a 32-bit configure would otherwise be reused and the
 # class check below would fail with a confusing message.
 if [ -d "$WORK/build64" ]; then
-    cmake -LA -N "$WORK/build64" 2>/dev/null | grep -q 'LINUX_32BIT:BOOL=OFF'         || rm -rf "$WORK/build64"
+    cmake -LA -N "$WORK/build64" 2>/dev/null | grep -q 'LINUX_32BIT:BOOL=OFF' || rm -rf "$WORK/build64"
 fi
 cmake -S "$WORK" -B "$WORK/build64" -DCMAKE_BUILD_TYPE=Release -DLINUX_32BIT=OFF >/tmp/moon64-cr-configure.log 2>&1 \
     || { tail -20 /tmp/moon64-cr-configure.log; die "cmake configure failed"; }
@@ -81,8 +84,9 @@ dim "cloud_redirect_cli    $(size_of "$OUT/cloud_redirect_cli") B"
 
 # The hook is LD_PRELOADed into the client, which runs on this host (not inside
 # the sniper container), so the local glibc is the ceiling that matters.
-local_glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' | head -1)"
-need_glibc="$(readelf -V "$OUT/cloud_redirect.so" 2>/dev/null \
+local_glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
+[ -n "$local_glibc" ] || local_glibc="$(LC_ALL=C ldd --version 2>/dev/null | awk 'NR==1{for(i=NF;i>=1;i--) if($i ~ /^[0-9]+\.[0-9]+$/){print $i; exit}}')"
+need_glibc="$(LC_ALL=C readelf -V "$OUT/cloud_redirect.so" 2>/dev/null \
     | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -uV | tail -1)"
 if [ -n "$local_glibc" ] && [ -n "$need_glibc" ]; then
     if [ "$(printf '%s\n%s\n' "$need_glibc" "$local_glibc" | sort -V | tail -1)" != "$local_glibc" ]; then
@@ -99,10 +103,18 @@ ok "symbols resolve"
 if [ "$install_artifacts" = 1 ]; then
     mkdir -p "$DEST"
     for f in cloud_redirect.so cloud_redirect_cli; do
+        if [ -f "$DEST/$f.32.bak" ]; then
+            if [ ! -f "$DEST/$f.32" ]; then
+                mv -f "$DEST/$f.32.bak" "$DEST/$f.32" || die "cannot migrate $DEST/$f.32.bak"
+                dim "migrated $f.32.bak -> $f.32"
+            elif cmp -s "$DEST/$f.32.bak" "$DEST/$f.32"; then
+                rm -f "$DEST/$f.32.bak"
+            fi
+        fi
         if [ -f "$DEST/$f" ] && ! file -b "$DEST/$f" | grep -q 'ELF 64-bit'; then
-            if [ ! -f "$DEST/$f.32.bak" ]; then
-                cp -a "$DEST/$f" "$DEST/$f.32.bak" || die "cannot back up $DEST/$f"
-                dim "saved the 32-bit $f as $f.32.bak"
+            if [ ! -f "$DEST/$f.32" ]; then
+                cp -a "$DEST/$f" "$DEST/$f.32" || die "cannot back up $DEST/$f"
+                dim "saved the 32-bit $f as $f.32"
             fi
         fi
         install -m 755 "$OUT/$f" "$DEST/$f" || die "cannot install $f"
