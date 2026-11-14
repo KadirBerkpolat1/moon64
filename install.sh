@@ -139,12 +139,36 @@ if [ -z "$src_dir" ]; then
     fi
 fi
 
-# Fetch or refresh the pinned checkout when it is not present.
+# Fetch the pinned checkout when it is not present. The fork is private, so a
+# plain git clone would stop at a credential prompt -- which in a
+# non-interactive installer is just a failure. Prefer gh (already
+# authenticated when it is installed), then the git credential helper, and
+# otherwise say precisely what to do instead of dying with "clone failed".
 if [ ! -f "$src_dir/Makefile" ]; then
     command -v git >/dev/null || die "git is required to fetch the SLSsteam source"
-    dim "cloning $SLS64_REPO ($SLS64_REF) into $src_dir"
     mkdir -p "$(dirname "$src_dir")" || die "cannot create $(dirname "$src_dir")"
-    git clone --depth 1 --branch "$SLS64_REF" "$SLS64_REPO" "$src_dir" || die "git clone failed"
+    dim "cloning $SLS64_REPO ($SLS64_REF) into $src_dir"
+
+    slug="${SLS64_REPO#https://github.com/}"
+    slug="${slug%.git}"
+
+    cloned=0
+    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+        gh repo clone "$slug" "$src_dir" -- --depth 1 --branch "$SLS64_REF" >/dev/null 2>&1 && cloned=1
+    fi
+    if [ "$cloned" = 0 ]; then
+        GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$SLS64_REF" \
+            "$SLS64_REPO" "$src_dir" >/dev/null 2>&1 && cloned=1
+    fi
+    if [ "$cloned" = 0 ]; then
+        bad "cannot fetch the private SLSsteam fork: $slug"
+        dim "  Option 1: gh auth login, then re-run (gh is used when authenticated)."
+        dim "  Option 2: clone it yourself and pass the path:"
+        dim "            git clone $SLS64_REPO ~/Projects/slsteam-moon-64"
+        dim "            SLS64_SRC=~/Projects/slsteam-moon-64 ./install.sh"
+        die "no SLSsteam source available"
+    fi
+    ok "cloned $slug into $src_dir"
 else
     ok "using source at $src_dir"
 fi
