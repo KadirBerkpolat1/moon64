@@ -61,7 +61,8 @@ ok "source at $( cd "$WORK" && git rev-parse --short HEAD )"
 # Drop a stale build tree: a 32-bit configure would otherwise be reused and the
 # class check below would fail with a confusing message.
 if [ -d "$WORK/build64" ]; then
-    cmake -LA -N "$WORK/build64" 2>/dev/null | grep -q 'LINUX_32BIT:BOOL=OFF' || rm -rf "$WORK/build64"
+    cmake_out="$(cmake -LA -N "$WORK/build64" 2>/dev/null || true)"
+    case "$cmake_out" in *'LINUX_32BIT:BOOL=OFF'*) ;; *) rm -rf "$WORK/build64" ;; esac
 fi
 cmake -S "$WORK" -B "$WORK/build64" -DCMAKE_BUILD_TYPE=Release -DLINUX_32BIT=OFF >/tmp/moon64-cr-configure.log 2>&1 \
     || { tail -20 /tmp/moon64-cr-configure.log; die "cmake configure failed"; }
@@ -74,7 +75,8 @@ ok "built cloud_redirect.so + cloud_redirect_cli"
 mkdir -p "$OUT"
 for f in cloud_redirect.so cloud_redirect_cli; do
     [ -f "$WORK/build64/$f" ] || die "$f missing from the build tree"
-    file -b "$WORK/build64/$f" | grep -q 'ELF 64-bit' || die "$f is not ELF 64-bit"
+    f_info="$(file -b "$WORK/build64/$f" 2>/dev/null || true)"
+    case "$f_info" in *'ELF 64-bit'*) ;; *) die "$f is not ELF 64-bit" ;; esac
     install -m 755 "$WORK/build64/$f" "$OUT/$f"
 done
 ok "artifacts in $OUT"
@@ -95,8 +97,16 @@ if [ -n "$local_glibc" ] && [ -n "$need_glibc" ]; then
     ok "glibc requirement $need_glibc <= host $local_glibc"
 fi
 
-ldd -r "$OUT/cloud_redirect.so" 2>&1 | grep -q 'undefined symbol' \
-    && { ldd -r "$OUT/cloud_redirect.so" 2>&1 | grep 'undefined symbol'; die "unresolved symbols"; }
+# Capture the ldd output once, then inspect it. Piping ldd into `grep -q` under
+# `set -o pipefail` lets grep exit early, SIGPIPE kills ldd, and a clean library
+# looks like it has unresolved symbols.
+ldd_out="$(ldd -r "$OUT/cloud_redirect.so" 2>&1 || true)"
+case "$ldd_out" in
+    *'undefined symbol'*)
+        grep 'undefined symbol' <<<"$ldd_out" >&2
+        die "unresolved symbols"
+        ;;
+esac
 ok "symbols resolve"
 
 # --- install ----------------------------------------------------------------
@@ -111,7 +121,9 @@ if [ "$install_artifacts" = 1 ]; then
                 rm -f "$DEST/$f.32.bak"
             fi
         fi
-        if [ -f "$DEST/$f" ] && ! file -b "$DEST/$f" | grep -q 'ELF 64-bit'; then
+        d_info=""
+        [ -f "$DEST/$f" ] && d_info="$(file -b "$DEST/$f" 2>/dev/null || true)"
+        if [ -f "$DEST/$f" ] && ! case "$d_info" in *'ELF 64-bit'*) true ;; *) false ;; esac; then
             if [ ! -f "$DEST/$f.32" ]; then
                 cp -a "$DEST/$f" "$DEST/$f.32" || die "cannot back up $DEST/$f"
                 dim "saved the 32-bit $f as $f.32"

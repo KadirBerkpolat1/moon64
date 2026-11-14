@@ -60,7 +60,16 @@ fi
 mkdir -p "$MOON_DIR" || die "cannot create $MOON_DIR"
 
 # is_elf64 <file> — true when the file exists and is a 64-bit ELF.
-is_elf64() { [ -f "$1" ] && file -b "$1" 2>/dev/null | grep -q 'ELF 64-bit'; }
+# grep -q exits as soon as it matches. Under `set -o pipefail` the producer then
+# dies of SIGPIPE and the pipeline reports failure even though the match
+# succeeded -- a false negative that reads as "not 64-bit" / "no libcurl".
+# Capture first, then match, so no pipeline is involved.
+is_elf64() {
+    local info
+    info="$(file -b "$1" 2>/dev/null || true)"
+    case "$info" in *'ELF 64-bit'*) return 0 ;; esac
+    return 1
+}
 
 # probe_slssteam_deps <so> — verify every DT_NEEDED library (e.g. libdbus-1.so.3),
 # transitive runtime dependency, symbol resolution, and glibc ceiling on host.
@@ -113,8 +122,8 @@ probe_slssteam_deps() {
         ok "SLSsteam.so glibc requirement $need_glibc <= host $local_glibc"
     fi
 
-    if printf '%s\n' "$ldd_out" | grep -qE 'undefined symbol|version .* not found'; then
-        printf '%s\n' "$ldd_out" | grep -E 'undefined symbol|version .* not found' >&2
+    if grep -qE 'undefined symbol|version .* not found' <<<"$ldd_out"; then
+        grep -E 'undefined symbol|version .* not found' <<<"$ldd_out" >&2
         die "SLSsteam.so has unresolved symbols or symbol versions on this host"
     fi
     ok "SLSsteam.so runtime dependencies satisfied ($(printf '%s' "$needed" | tr '\n' ' ' | sed 's/ $//'))"
@@ -223,6 +232,21 @@ if [ -n "$missing_dev" ]; then
     die "missing build headers:$missing_dev"
 fi
 
+# Build host floor. The x86_64 source is C++20, and under C++20 glibc's own
+# <cstdlib> redirects strtol/strtoul/strtoll/strtoull to __isoc23_strto*,
+# which first shipped in glibc 2.38. Nothing in the fork calls strtol directly,
+# so there is no source-level opt-out: the build host must be >= 2.38 or the
+# link fails. Say that up front instead of letting make fail eight minutes in.
+host_glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
+if [ -n "$host_glibc" ]; then
+    # sort -V picks the older of the two, so equality with the floor means ok.
+    older="$(printf '%s\n%s\n' "$host_glibc" 2.38 | sort -V | head -1)"
+    if [ "$older" != 2.38 ]; then
+        die "this host has glibc $host_glibc; the x86_64 build needs >= 2.38 (C++20 __isoc23_strto*)"
+    fi
+    ok "build host glibc $host_glibc >= 2.38"
+fi
+
 # Build. ARCH is explicit so the 32-bit default of the fork is never used here.
 dim "building the 64-bit SLSsteam from $src_dir"
 ( cd "$src_dir" && make ARCH=x86_64 -j"$(nproc 2>/dev/null || echo 2)" )     >"${TMPDIR:-/tmp}/moon64-build.log" 2>&1     || { tail -20 "${TMPDIR:-/tmp}/moon64-build.log" >&2; die "SLSsteam build failed (full log: ${TMPDIR:-/tmp}/moon64-build.log)"; }
@@ -230,6 +254,16 @@ dim "building the 64-bit SLSsteam from $src_dir"
 is_elf64 "$src_dir/bin/SLSsteam.so" || die "built SLSsteam.so is not 64-bit"
 probe_slssteam_deps "$src_dir/bin/SLSsteam.so"
 install -m 755 "$src_dir/bin/SLSsteam.so" "$MOON_DIR/SLSsteam.so.64" || die "cannot stage SLSsteam.so.64"
+
+# libcurl is dlopen'd, not linked (src/curl.cpp:22), so it never shows up in
+# DT_NEEDED and probe_slssteam_deps cannot see it. Without a 64-bit
+# libcurl.so.4 on the host the network features degrade to "libcurl
+# unavailable" -- provisioning, fixes and updates all stop working.
+ldcache="$(ldconfig -p 2>/dev/null || true)"
+if ! case "$ldcache" in *libcurl.so.4*) true ;; *) false ;; esac; then
+    warn "no libcurl.so.4 on this host; network features will be unavailable"
+    dim "  install the 64-bit curl runtime (e.g. curl / libcurl4)"
+fi
 ok "staged $MOON_DIR/SLSsteam.so.64 (built from source)"
 
 # Keep the 32-bit original next to the active file, so `moon64 off` can restore

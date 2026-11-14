@@ -79,11 +79,16 @@ done
 # corrupts the client heap during init). Skipped silently when the installed
 # hook is the 32-bit build — it cannot load into a 64-bit client.
 CR_SO="$HOME/.local/share/CloudRedirect/cloud_redirect.so"
-if [ -f "$CR_SO" ] && file -b "$CR_SO" 2>/dev/null | grep -q 'ELF 64-bit'; then
-    export LD_PRELOAD="$CR_SO${LD_PRELOAD:+:$LD_PRELOAD}"
-else
-    [ -f "$CR_SO" ] && log "CloudRedirect hook is not 64-bit; cloud saves disabled"
-fi
+cr_info=""
+[ -f "$CR_SO" ] && cr_info="$(file -b "$CR_SO" 2>/dev/null || true)"
+case "$cr_info" in
+    *'ELF 64-bit'*)
+        export LD_PRELOAD="$CR_SO${LD_PRELOAD:+:$LD_PRELOAD}"
+        ;;
+    *)
+        [ -f "$CR_SO" ] && log "CloudRedirect hook is not 64-bit; cloud saves disabled"
+        ;;
+esac
 
 # Steam Input under Wayland (same rationale as upstream: no-op elsewhere).
 if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
