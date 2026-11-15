@@ -193,6 +193,7 @@ assert_same "a1: netsock64.so staged byte-exact" "$rel/netsock64.so" "$sb/moon64
 assert_not_contains "a1: nothing compiled" "built $sb/moon64/netsock64.so" "$out"
 assert_contains "a1: summary: SLSsteam prebuilt" "SLSsteam.so.64: prebuilt (file://$rel/SLSsteam.so)" "$out"
 assert_contains "a1: summary: netsock64 prebuilt" "netsock64.so: prebuilt (file://$rel/netsock64.so)" "$out"
+assert_contains "a1: summary: a staged netsock64.so is ok" $'\n  ok   netsock64.so: prebuilt' "$out"
 assert_contains "a1: state records netsock64 as prebuilt" "source=prebuilt" "$(cat "$sb/moon64/netsock64.state" 2>/dev/null)"
 assert_same "a1: rollback target fetched" "$REL32/tree/bin/SLSsteam.so" "$SLS/SLSsteam.so.32"
 assert_absent "a1: temporary download removed" "$(compgen -G "$sb/tmp/moon64-prebuilt.*")"
@@ -262,6 +263,8 @@ assert_contains "d1: says the release has none" "the release has no file://$rel/
 assert_contains "d1: says the cert patch is inactive" "the release has no netsock64.so and gcc is not installed to build it: the P2P cert patch will be inactive" "$out"
 assert_contains "d1: degraded, not failed" "this is a degraded feature, not a failed install" "$out"
 assert_contains "d1: summary" "netsock64.so: none (the P2P cert patch is inactive)" "$out"
+assert_contains "d1: summary: no cert patch is a warn" $'\n warn  netsock64.so: none (the P2P cert patch is inactive)' "$out"
+assert_not_contains "d1: summary: not ok" $'\n  ok   netsock64.so:' "$out"
 assert_absent "d1: no netsock64.so" "$sb/moon64/netsock64.so"
 assert_same "d1: SLSsteam.so still staged" "$rel/SLSsteam.so" "$sb/moon64/SLSsteam.so.64"
 
@@ -270,6 +273,13 @@ out="$(SANDBOX_PATH="$PATH" run "$sb" "$rel" bash "$REPO_ROOT/install.sh" --preb
 assert_rc "d2: with gcc it is built from patches/netsock64" 0 "$rc" "$out"
 assert_contains "d2: summary" "netsock64.so: built from $REPO_ROOT/patches/netsock64/steamclient_audit64.c" "$out"
 assert_contains "d2: state records the build" "source=built" "$(cat "$sb/moon64/netsock64.state" 2>/dev/null)"
+assert_contains "d2: summary: a built netsock64.so is ok" $'\n  ok   netsock64.so: built from ' "$out"
+
+out="$(run "$sb" "$rel" bash "$REPO_ROOT/install.sh" --prebuilt 2>&1)"; rc=$?
+assert_rc "d3: re-run without gcc keeps the built netsock64.so" 0 "$rc" "$out"
+assert_contains "d3: says so" "gcc is not installed to build it; keeping the netsock64.so from an earlier install" "$out"
+assert_contains "d3: summary: a kept netsock64.so is a warn" $'\n warn  netsock64.so: kept from an earlier install' "$out"
+assert_not_contains "d3: summary: not ok" $'\n  ok   netsock64.so:' "$out"
 
 printf 'Summary: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
