@@ -48,16 +48,19 @@ curl -fsSL https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/get.sh 
 ~/.local/share/moon64/moon64 on
 ```
 
-[`get.sh`](get.sh) downloads `install.sh`, `bin/moon64`, `bin/wrapper.64.sh`
-and `versions.env` with `curl` into a temporary directory, prints each URL
-and SHA-256, and runs `install.sh --prebuilt` from there. That downloads the
-prebuilt `SLSsteam.so` from the latest slsteam-moon-64 release and verifies it
-(see [Prebuilt binaries](#prebuilt-binaries)): no `git`, no compiler. It
-verifies the release's `netsock64.so` the same way when the release carries
-one, but today's release, `v1.0.0`, carries only `SLSsteam.so`: a binary
-install today runs without the P2P cert patch, and the install says so. It
-stops an idle Steam client itself (`moon64 stop-steam`) and refuses only while
-a game is running.
+[`get.sh`](get.sh) downloads `install.sh`, `bin/moon64`, `bin/wrapper.64.sh`,
+`versions.env` and the cert patch source
+`patches/netsock64/steamclient_audit64.c` with `curl` into a temporary
+directory, prints each URL and SHA-256, and runs `install.sh --prebuilt` from
+there. That downloads the prebuilt `SLSsteam.so` from the latest
+slsteam-moon-64 release and verifies it (see
+[Prebuilt binaries](#prebuilt-binaries)): no `git`, no compiler. It verifies
+the release's `netsock64.so` the same way when the release carries one, but
+today's release, `v1.0.0`, carries only `SLSsteam.so`. So today the P2P cert
+patch is built from the downloaded source if `gcc` is installed; without
+`gcc` the install still succeeds, warns that the cert patch is inactive, and
+co-op joins that need peer-to-peer fail. It stops an idle Steam client itself
+(`moon64 stop-steam`) and refuses only while a game is running.
 
 `get.sh` never installs packages. If prerequisites are missing it shows them
 with the package-manager command, and the re-run that lets `install.sh`
@@ -71,7 +74,8 @@ curl -fsSL https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/get.sh 
 nothing. `MOON64_REF` picks the moon64 branch, tag or commit (default `main`);
 `MOON64_DIR` and `SLSM_PREBUILT_URL` reach `install.sh` unchanged. If
 `install.sh` fails, `get.sh` puts `~/.local/share/moon64` back exactly as it
-found it, or removes it if this run created it.
+found it, or removes it if this run created it, and removes
+`~/.local/share/SLSsteam` too if this run created that.
 
 The install only stages files; nothing changes until `moon64 on`.
 `moon64 doctor` is the pre-flight: fix everything it reports as bad before
@@ -212,7 +216,8 @@ The current release, slsteam-moon-64
 (marked Latest), publishes `SLSsteam.so`, `SLSsteam.so.sha256` and
 `pattern-status.txt`, so `--prebuilt` stages the prebuilt `SLSsteam.so` after
 the checks above. It does not publish `netsock64.so`, so a binary install today
-has no P2P cert patch unless `patches/netsock64` and `gcc` are both present.
+builds the P2P cert patch from `patches/netsock64` (which `get.sh` downloads)
+when `gcc` is installed, and runs without it otherwise.
 [`RELEASING.md`](RELEASING.md) lists what a release must contain and how to
 build it.
 
@@ -220,7 +225,7 @@ build it.
 
 | path | what it is |
 |---|---|
-| `get.sh` | the `curl \| bash` installer: fetches the four files below and runs `install.sh --prebuilt` |
+| `get.sh` | the `curl \| bash` installer: fetches `install.sh`, `bin/moon64`, `bin/wrapper.64.sh`, `versions.env` and `patches/netsock64/steamclient_audit64.c`, then runs `install.sh --prebuilt` |
 | `patches/netsock64/steamclient_audit64.c` | `LD_AUDIT` shim that patches the cert-check function in the 64-bit `steamclient.so` at load time |
 | `bin/build-cloudredirect.sh` | builds CloudRedirect 64-bit from a pinned upstream commit |
 | `bin/wrapper.64.sh` | the 64-bit Steam launcher (what `SLSsteam/path/steam` becomes) |

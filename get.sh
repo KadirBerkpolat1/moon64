@@ -3,17 +3,20 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/get.sh | bash
 #
-# Downloads install.sh, bin/moon64, bin/wrapper.64.sh and versions.env with curl
-# into a temporary directory and runs `install.sh --prebuilt` from there, which
-# downloads the prebuilt SLSsteam.so and netsock64.so: no git, no compiler.
-# It stages ~/.local/share/moon64 and activates nothing; `moon64 on` does that.
+# Downloads install.sh, bin/moon64, bin/wrapper.64.sh, versions.env and the
+# netsock64 source with curl into a temporary directory and runs
+# `install.sh --prebuilt` from there: SLSsteam.so (and netsock64.so, when the
+# release has one) come prebuilt, so no git and no compiler are needed. Without
+# a prebuilt netsock64.so, install.sh builds it from that source if gcc is
+# installed. It stages ~/.local/share/moon64 and activates nothing; `moon64 on`
+# does that.
 #
 # Everything below is inside main(), so bash has read the whole script before
 # it runs any of it: a download cut short runs nothing, and no command can read
 # the rest of this script from stdin when it arrives through a pipe.
 
 GET_REPO_RAW="https://raw.githubusercontent.com/KadirBerkpolat1/moon64"
-GET_FILES=(install.sh bin/moon64 bin/wrapper.64.sh versions.env)
+GET_FILES=(install.sh bin/moon64 bin/wrapper.64.sh versions.env patches/netsock64/steamclient_audit64.c)
 
 get_usage() {
     cat <<'EOF'
@@ -66,6 +69,10 @@ get_restore() {
 get_cleanup() {
     if [ "$GET_INSTALLING" = 1 ]; then
         get_restore
+        if [ "$GET_HAD_SLS_DIR" = 0 ] && [ -e "$GET_SLS_DIR" ]; then
+            rm -rf "$GET_SLS_DIR"
+            get_fail "removed $GET_SLS_DIR, which this run had created"
+        fi
     fi
     [ -z "$GET_TMP" ] || rm -rf "$GET_TMP"
 }
@@ -146,6 +153,9 @@ main() {
         done
     fi
     GET_MOON_DIR="$moon_dir"
+    GET_SLS_DIR="$HOME/.local/share/SLSsteam"
+    GET_HAD_SLS_DIR=0
+    [ ! -e "$GET_SLS_DIR" ] || GET_HAD_SLS_DIR=1
 
     printf 'moon64: running install.sh --prebuilt%s\n\n' "${pass[*]:+ ${pass[*]}}"
     log="$GET_TMP/install.log"

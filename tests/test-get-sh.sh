@@ -107,7 +107,7 @@ NOCC_NO_READELF="$(mirror_path readelf)"
 
 # --- fixtures ----------------------------------------------------------------
 RAW="$TMP_ROOT/raw"
-FILES=(install.sh bin/moon64 bin/wrapper.64.sh versions.env)
+FILES=(install.sh bin/moon64 bin/wrapper.64.sh versions.env patches/netsock64/steamclient_audit64.c)
 for ref in main v-test broken; do
     for f in "${FILES[@]}"; do
         mkdir -p "$RAW/$ref/$(dirname "$f")"
@@ -238,7 +238,7 @@ sb="$(make_sandbox c)"
 MD="$sb/home/.local/share/moon64"
 out="$(pipe_get "$sb" 2>&1)"; rc=$?
 assert_rc "c1: get.sh installs with no git or compiler on PATH" 0 "$rc" "$out"
-assert_eq "c1: fetched exactly the four files, from main" "$(expected_raw main)" "$(raw_urls "$sb")"
+assert_eq "c1: fetched exactly the five files, from main" "$(expected_raw main)" "$(raw_urls "$sb")"
 assert_contains "c1: says where it downloads from" "moon64: downloading the installer from https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main" "$out"
 assert_contains "c1: prints each file's digest" "bin/moon64  sha256 $(sha "$REPO_ROOT/bin/moon64")" "$out"
 assert_contains "c1: runs the installer with --prebuilt" "moon64: running install.sh --prebuilt" "$out"
@@ -260,7 +260,7 @@ GETSH_ENV=(MOON64_REF=v-test MOON64_DIR="$sb/custom" SLSM_PREBUILT_URL="file://$
 out="$(pipe_get "$sb" 2>&1)"; rc=$?
 GETSH_ENV=()
 assert_rc "d1: succeeds" 0 "$rc" "$out"
-assert_eq "d1: fetched the four files at MOON64_REF" "$(expected_raw v-test)" "$(raw_urls "$sb")"
+assert_eq "d1: fetched the five files at MOON64_REF" "$(expected_raw v-test)" "$(raw_urls "$sb")"
 assert_same "d1: staged into MOON64_DIR" "$REL_OTHER/netsock64.so" "$sb/custom/netsock64.so"
 assert_absent "d1: not into the default" "$sb/home/.local/share/moon64"
 assert_contains "d1: from SLSM_PREBUILT_URL" "SLSsteam.so.64: prebuilt (file://$REL_OTHER/SLSsteam.so)" "$out"
@@ -300,6 +300,8 @@ assert_rc "f2: fails" 1 "$rc" "$out"
 assert_contains "f2: after staging" "staged $sb/home/.local/share/moon64/SLSsteam.so.64" "$out"
 assert_contains "f2: says it cleaned up" "removed $sb/home/.local/share/moon64, which this run had created" "$out"
 assert_absent "f2: no half-populated moon64 directory" "$sb/home/.local/share/moon64"
+assert_contains "f2: says it removed the SLSsteam directory too" "removed $sb/home/.local/share/SLSsteam, which this run had created" "$out"
+assert_absent "f2: no empty SLSsteam directory left behind" "$sb/home/.local/share/SLSsteam"
 
 # Same failure over an earlier install: put back exactly as it was.
 sb="$(make_sandbox f3 clean)"
@@ -317,6 +319,16 @@ assert_contains "f3: after staging" "staged $MD/SLSsteam.so.64" "$out"
 assert_contains "f3: says it restored" "restored $MD to what it was before this run" "$out"
 assert_eq "f3: the earlier install is byte-identical" "$before" "$(snapshot "$MD")"
 assert_eq "f3: temporary files removed" "" "$(ls -A "$sb/tmp")"
+assert_absent "f3: the SLSsteam directory this run created is gone" "$sb/home/.local/share/SLSsteam"
+
+# A failure on a machine that already had ~/.local/share/SLSsteam leaves it be.
+sb="$(make_sandbox f4)"
+before="$(snapshot "$sb/home/.local/share/SLSsteam")"
+GETSH_ENV=(SLSM_PREBUILT_URL="file://$REL_BAD/SLSsteam.so")
+out="$(pipe_get "$sb" 2>&1)"; rc=$?
+GETSH_ENV=()
+assert_rc "f4: fails" 1 "$rc" "$out"
+assert_eq "f4: the existing SLSsteam directory is untouched" "$before" "$(snapshot "$sb/home/.local/share/SLSsteam")"
 
 # --- (g) missing prerequisites: listed, with the re-run command; no sudo ------
 sb="$(make_sandbox g)"
