@@ -209,7 +209,7 @@ assert_contains "1: installs it non-interactively" "running: sudo -n pacman -S -
 assert_eq "1: package manager ran once, for binutils only" "-S --needed --noconfirm binutils" "$(cat "$sb/pacman.log" 2>/dev/null)"
 assert_contains "1: prebuilt sha256 verified" "prebuilt sha256 matches file://$sb/rel/SLSsteam.so.sha256" "$out"
 assert_contains "1: status file bound to the prebuilt" "pattern-status.txt was measured on this SLSsteam.so" "$out"
-assert_contains "1: pattern gate passed" "x86_64 pattern table complete" "$out"
+assert_contains "1: pattern gate accepts the fixture's hand-written complete status file" "x86_64 pattern table complete" "$out"
 assert_same "1: prebuilt staged byte-exact" "$sb/rel/SLSsteam.so" "$sb/moon64/SLSsteam.so.64"
 assert_absent "1: nothing was built" "$sb/make-ran"
 assert_contains "1: rollback target fetched" "rollback target: upstream SLSsteam 20990101000000 (32-bit) saved as" "$out"
@@ -247,11 +247,11 @@ assert_contains "3: doctor: entry starts the wrapper" "$APPS/steam.desktop start
 read -ra launch <<< "$(exec_line "$APPS/steam.desktop")"
 launch=("${launch[@]/\%U/steam://open/main}")
 run "${launch[@]}" >/dev/null 2>&1; rc=$?
-assert_rc "4: the desktop entry's command starts Steam" 0 "$rc"
+assert_rc "4: the desktop entry's command reaches the stub steam.sh" 0 "$rc"
 launched="$(cat "$LAUNCH_LOG" 2>/dev/null)"
-assert_contains "4: Steam got the URL" "ARGS=steam://open/main" "$launched"
-assert_contains "4: Steam runs the 64-bit client" "STEAM_FORCE_CLIENT=steamrt64" "$launched"
-assert_contains "4: SLSsteam is loaded" "$SLS/SLSsteam.so" "$(sed -n 's/^LD_AUDIT=//p' "$LAUNCH_LOG" 2>/dev/null)"
+assert_contains "4: the stub steam.sh got the URL" "ARGS=steam://open/main" "$launched"
+assert_contains "4: the wrapper exports STEAM_FORCE_CLIENT=steamrt64" "STEAM_FORCE_CLIENT=steamrt64" "$launched"
+assert_contains "4: the wrapper puts SLSsteam.so on LD_AUDIT (nothing is loaded: steam.sh is a stub)" "$SLS/SLSsteam.so" "$(sed -n 's/^LD_AUDIT=//p' "$LAUNCH_LOG" 2>/dev/null)"
 
 # --- 5. off ---------------------------------------------------------------
 out="$(run bash "$sb/moon64/moon64" off 2>&1)"; rc=$?
@@ -303,7 +303,7 @@ out="$(run bash "$sb/moon64/moon64" off 2>&1)"; rc=$?
 assert_rc "7: off succeeds" 0 "$rc" "$out"
 assert_same "7: the other launcher is left as is" "$sb/foreign-launcher" "$SLS/path/steam"
 assert_contains "7: and off says so" "$SLS/path/steam was replaced after 'moon64 on'; left as is" "$out"
-assert_contains "7: falls back to the 32-bit stack's client switch" "32-bit stack active" "$out"
+assert_contains "7: off reports the 32-bit stack active (message only; client markers not checked here)" "32-bit stack active" "$out"
 
 printf 'Summary: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
