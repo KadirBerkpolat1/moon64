@@ -762,8 +762,8 @@ if [ -z "$sls64_path" ]; then
         if [ "$cloned" = 0 ]; then
             bad "cannot fetch SLSsteam fork: $slug (network error or missing SLS64_REF '$SLS64_REF')"
             dim "  Option 1: clone it yourself and pass the path:"
-            dim "            git clone $SLS64_REPO \$HOME/slsteam-moon-64"
-            dim "            SLS64_SRC=\$HOME/slsteam-moon-64 ./install.sh"
+            dim "            git clone $SLS64_REPO \$HOME/slsteam-moon-x64"
+            dim "            SLS64_SRC=\$HOME/slsteam-moon-x64 ./install.sh"
             dim "  Option 2: if you use gh, run 'gh auth login' and re-run."
             die "no SLSsteam source available"
         fi

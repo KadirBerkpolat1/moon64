@@ -1,19 +1,20 @@
-# Publishing the prebuilt `SLSsteam.so` and `netsock64.so`
+# Publishing the prebuilt `SLSsteam.so`
 
 `./install.sh --prebuilt`, and with it `get.sh`, downloads the 64-bit
-`SLSsteam.so` and `netsock64.so` from a release of
-[slsteam-moon-64](https://github.com/KadirBerkpolat1/slsteam-moon-64) instead of
-compiling them. moon64 only consumes that release; it is built and published
-from slsteam-moon-64. The current release publishes `SLSsteam.so`,
-`netsock64.so`, a `.sha256` for each and a `pattern-status.txt` with both
-`binary_sha256=` and `netsock64_sha256=`. `v1.1.0` is the first that does;
-`v1.0.0` published only `SLSsteam.so`, its `.sha256` and a `pattern-status.txt`
-with no `netsock64_sha256=` line.
+`SLSsteam.so` from a release of
+[slsteam-moon-x64](https://github.com/KadirBerkpolat1/slsteam-moon-x64) instead
+of compiling it. moon64 only consumes that release; it is built and published
+from slsteam-moon-x64. The release publishes `SLSsteam.so`, its `.sha256` and
+a `pattern-status.txt` with a `binary_sha256=` line naming the library and a
+`source_commit=` line naming the commit. It publishes **no `netsock64.so`**:
+the P2P cert patch is built from `patches/netsock64` on the user's machine
+with `gcc`, or stays inactive when there is no compiler. A release that does
+carry `netsock64.so` is still accepted, bound by a `netsock64_sha256=` line.
 
 The default URL is `SLS64_PREBUILT_URL` in [`versions.env`](versions.env):
 
 ```
-https://github.com/KadirBerkpolat1/slsteam-moon-64/releases/latest/download/SLSsteam.so
+https://github.com/KadirBerkpolat1/slsteam-moon-x64/releases/latest/download/SLSsteam.so
 ```
 
 `latest` resolves to the newest release that is neither a draft nor a
@@ -21,31 +22,30 @@ pre-release, so the release must be published as a normal release.
 
 ## What the release must contain
 
-All five assets, attached to the same release:
+Three assets, attached to the same release, all produced by
+`scripts/moon64-assets.sh` in slsteam-moon-x64:
 
 | asset | where it comes from |
 |---|---|
-| `SLSsteam.so` | `dist/portable/x86_64/SLSsteam.so` from `scripts/build-portable-container.sh --arch x86_64` in slsteam-moon-64 |
-| `SLSsteam.so.sha256` | `sha256sum SLSsteam.so`, i.e. the `SLSsteam.so` line of the build's `SHA256SUMS` |
-| `netsock64.so` | the x86-64 `LD_AUDIT` cert patch, built in the same container from `steamclient_audit64.c` |
-| `netsock64.so.sha256` | `sha256sum netsock64.so` |
-| `pattern-status.txt` | `res/pattern-status.txt` as measured on that exact `SLSsteam.so`, plus a `binary_sha256=` line naming it and a `netsock64_sha256=` line naming `netsock64.so` |
+| `SLSsteam.so` | `bin/SLSsteam.so` from `scripts/build.sh --portable` (ubuntu-22.04 container, glibc 2.34 floor) |
+| `SLSsteam.so.sha256` | `sha256sum SLSsteam.so` |
+| `pattern-status.txt` | the committed `res/pattern-status.counts` plus `binary_sha256=` naming that exact library and `source_commit=` naming the commit |
 
-`install.sh` fetches `pattern-status.txt` and `netsock64.so` from the same
-directory as the library, and `<file>.sha256` next to each. A release without
-`netsock64.so` still installs, but then `netsock64.so` is compiled with `gcc`
-on the user's machine, or the P2P cert patch stays inactive if there is no
-`gcc`, so the binary install is only compiler-free with all five assets.
+`install.sh` fetches `pattern-status.txt` from the same directory as the
+library, and `<file>.sha256` next to it. The counts file is committed to the
+repo and the generator refuses to emit a status file whose table would not
+pass the install gate, so a release with a regressed locator table fails
+before it reaches users.
 
 ## Why the container build, never a host build
 
 `SLSsteam.so` is loaded with `LD_AUDIT` into the host's Steam process, so the
 `GLIBC_` and `GLIBCXX_` versions it needs are checked against the user's own
-glibc and libstdc++. A library is only as portable as the oldest runtime it was
-linked against:
+glibc and libstdc++. A library is only as portable as the oldest runtime it
+was linked against:
 
-- `build-portable-container.sh` links in an old-glibc image (AlmaLinux 8),
-  measures the floor it produced (`abi-floor.txt`) and refuses on regression.
+- `scripts/build.sh --portable` links in an ubuntu-22.04 image (glibc 2.34),
+  and `scripts/check-sls-abi.sh` refuses a build whose symbol floor moved.
   That floor is what makes a download useful on older distributions.
 - A host build needs glibc >= 2.38 for the C++20 `__isoc23_strto*` redirects,
   plus anything newer the build host happens to have. `install.sh --prebuilt`
@@ -58,38 +58,37 @@ linked against:
 The pattern gate trusts the counts in `pattern-status.txt` (`pending=0`,
 `runipcframe_tail=ready`), and those counts are evidence about one particular
 build. Without a binding, a status file from an older tag, a status asset
-replaced on its own, or a `latest/download` that moved between the two requests
-would pass the gate for a library it never described. So the published file
-must name the library it was measured on:
+replaced on its own, or a `latest/download` that moved between the two
+requests would pass the gate for a library it never described. So the
+published file must name the library it was measured on:
 
 ```
 binary_sha256=<sha256 of the published SLSsteam.so>
-netsock64_sha256=<sha256 of the published netsock64.so>
 ```
 
-`install.sh` refuses the download, with nothing staged, unless each line
-appears exactly once and matches the downloaded file. Append them only after
-measuring that exact library: `binary_sha256=` asserts that the counts above it
-were measured on these bytes, and `netsock64_sha256=` that this `netsock64.so`
-was published with them.
+`install.sh` refuses the download, with nothing staged, unless the line
+appears exactly once and matches the downloaded file. Append it only after
+building that exact library: `binary_sha256=` asserts that the counts above it
+were measured on these bytes. If a release ever carries `netsock64.so` again,
+its `netsock64_sha256=` line binds the same way.
 
 ## Publishing
 
-From a slsteam-moon-64 checkout whose `res/pattern-status.txt` was measured on
-the library this build produces:
+CI (`.github/workflows/release.yml` in slsteam-moon-x64) builds, tests and
+publishes on every push to `main`: portable build, `make -k test-ci`,
+`scripts/moon64-assets.sh bin/SLSsteam.so release/`, then a `v<timestamp>`
+release whose public URLs are verified anonymously before it becomes `latest`.
+
+When Actions is unavailable, the same steps run locally in the same container
+image (`slsteam-moon-builder-x86_64`, from `scripts/Dockerfile.x86_64`):
 
 ```sh
-scripts/build-portable-container.sh --arch x86_64 --out dist/portable/x86_64
-out=dist/portable/x86_64
-sum="$(sha256sum "$out/SLSsteam.so" | cut -d' ' -f1)"
-ns="$(sha256sum "$out/netsock64.so" | cut -d' ' -f1)"
-cp res/pattern-status.txt "$out/pattern-status.txt"
-printf 'binary_sha256=%s\nnetsock64_sha256=%s\n' "$sum" "$ns" >> "$out/pattern-status.txt"
-printf '%s  SLSsteam.so\n' "$sum" > "$out/SLSsteam.so.sha256"
-printf '%s  netsock64.so\n' "$ns" > "$out/netsock64.so.sha256"
-gh release create <tag> --repo KadirBerkpolat1/slsteam-moon-64 \
-    "$out/SLSsteam.so" "$out/SLSsteam.so.sha256" \
-    "$out/netsock64.so" "$out/netsock64.so.sha256" "$out/pattern-status.txt"
+make clean && make -j"$(nproc)" ARCH=x86_64 && make -k test-ci
+scripts/check-sls-abi.sh bin/SLSsteam.so
+scripts/moon64-assets.sh bin/SLSsteam.so release/
+gh release create <tag> --repo KadirBerkpolat1/slsteam-moon-x64 \
+    release/SLSsteam.so release/SLSsteam.so.sha256 release/pattern-status.txt \
+    --target "$(git rev-parse HEAD)" --latest
 ```
 
 ## What `install.sh --prebuilt` checks

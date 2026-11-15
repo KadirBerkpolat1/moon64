@@ -156,7 +156,7 @@ for a in "$@"; do
         https://raw.githubusercontent.com/KadirBerkpolat1/moon64/*)
             printf '%s\n' "$a" >> "$GETSH_CURL_LOG"
             a="file://$GETSH_RAW/${a#https://raw.githubusercontent.com/KadirBerkpolat1/moon64/}" ;;
-        https://github.com/KadirBerkpolat1/slsteam-moon-64/releases/latest/download/*)
+        https://github.com/KadirBerkpolat1/slsteam-moon-x64/releases/latest/download/*)
             printf '%s\n' "$a" >> "$GETSH_CURL_LOG"
             a="file://$GETSH_REL/${a##*/}" ;;
         file://*)
@@ -253,8 +253,8 @@ assert_eq "c1: fetched exactly the five files, from main" "$(expected_raw main)"
 assert_contains "c1: says where it downloads from" "moon64: downloading the installer from https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main" "$out"
 assert_contains "c1: prints each file's digest" "bin/moon64  sha256 $(sha "$REPO_ROOT/bin/moon64")" "$out"
 assert_contains "c1: runs the installer with --prebuilt" "moon64: running install.sh --prebuilt" "$out"
-assert_contains "c1: SLSsteam.so from the default release" "SLSsteam.so.64: prebuilt (https://github.com/KadirBerkpolat1/slsteam-moon-64/releases/latest/download/SLSsteam.so)" "$out"
-assert_contains "c1: netsock64.so from the same release" "netsock64.so: prebuilt (https://github.com/KadirBerkpolat1/slsteam-moon-64/releases/latest/download/netsock64.so)" "$out"
+assert_contains "c1: SLSsteam.so from the default release" "SLSsteam.so.64: prebuilt (https://github.com/KadirBerkpolat1/slsteam-moon-x64/releases/latest/download/SLSsteam.so)" "$out"
+assert_contains "c1: netsock64.so from the same release" "netsock64.so: prebuilt (https://github.com/KadirBerkpolat1/slsteam-moon-x64/releases/latest/download/netsock64.so)" "$out"
 assert_same "c1: SLSsteam.so.64 staged" "$REL/SLSsteam.so" "$MD/SLSsteam.so.64"
 assert_same "c1: netsock64.so staged" "$REL/netsock64.so" "$MD/netsock64.so"
 assert_same "c1: moon64 installed" "$REPO_ROOT/bin/moon64" "$MD/moon64"
@@ -370,7 +370,7 @@ assert_eq "f4: the existing SLSsteam directory is untouched" "$before" "$(snapsh
 # --- (h) through the pipe, a release without netsock64.so and without a binding
 # line (what v1.0.0 publishes): built from the fetched source with gcc, a loud
 # but successful degraded install without it ---------------------------------
-REL_URL="https://github.com/KadirBerkpolat1/slsteam-moon-64/releases/latest/download"
+REL_URL="https://github.com/KadirBerkpolat1/slsteam-moon-x64/releases/latest/download"
 sb="$(make_sandbox h1)"
 MD="$sb/home/.local/share/moon64"
 out="$(GETSH_RELEASE="$REL_ABSENT" GETSH_PATH="$PATH" pipe_get "$sb" 2>&1)"; rc=$?

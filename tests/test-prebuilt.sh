@@ -259,7 +259,7 @@ assert_absent "f3: nothing staged" "$sb/moon64/SLSsteam.so.64"
 
 # --- (g) the documented default ------------------------------------------
 assert_contains "g1: default points at the project's release asset" \
-    "https://github.com/KadirBerkpolat1/slsteam-moon-64/releases/" \
+    "https://github.com/KadirBerkpolat1/slsteam-moon-x64/releases/" \
     "$(sed -n 's/^SLS64_PREBUILT_URL="\(.*\)"$/\1/p' "$REPO_ROOT/versions.env")"
 assert_contains "g2: --help documents the flag" "--prebuilt" "$(bash "$REPO_ROOT/install.sh" --help)"
 
