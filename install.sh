@@ -204,6 +204,11 @@ probe_slssteam_deps() {
 
     if grep -qE 'undefined symbol|version .* not found' <<<"$ldd_out"; then
         grep -E 'undefined symbol|version .* not found' <<<"$ldd_out" >&2
+        case "$ldd_out" in
+            *GLIBCXX_*'not found'*)
+                bad "SLSsteam.so requires a newer libstdc++ (missing GLIBCXX_* version, e.g. GLIBCXX_3.4.32 / GCC 13+)"
+                ;;
+        esac
         die "SLSsteam.so has unresolved symbols or symbol versions on this host"
     fi
     ok "SLSsteam.so runtime dependencies satisfied ($(printf '%s' "$needed" | tr '\n' ' ' | sed 's/ $//'))"

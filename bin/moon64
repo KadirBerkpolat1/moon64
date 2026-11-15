@@ -22,6 +22,8 @@ MOON_DIR="${MOON64_DIR:-$HOME/.local/share/moon64}"
 SLS_DIR="$HOME/.local/share/SLSsteam"
 CR_DIR="$HOME/.local/share/CloudRedirect"
 ENV_CONF="${MOON64_ENV_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/environment.d/steam-32bit.conf}"
+ENV_D_DIR="${MOON64_ENV_D_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/environment.d}"
+LUMEN_FIX_INSTALLS_DIR="${LUMEN_FIX_INSTALLS_DIR:-$HOME/.local/share/Lumen/fix_installs}"
 STAGE_DIR="$MOON_DIR/staged"
 STEAM_ROOTS=("$HOME/.steam/steam" "$HOME/.local/share/Steam" "$HOME/.steam/debian-installation")
 
@@ -562,7 +564,12 @@ check_slssteam_runtime_deps() {
         esac
         return 1
     fi
-    if printf '%s\n' "$ldd_out" | grep -qE 'undefined symbol|version .* not found'; then
+    if grep -qE 'undefined symbol|version .* not found' <<<"$ldd_out"; then
+        case "$ldd_out" in
+            *GLIBCXX_*'not found'*)
+                bad "SLSsteam.so requires a newer libstdc++ (missing GLIBCXX_* version, e.g. GLIBCXX_3.4.32 / GCC 13+)"
+                ;;
+        esac
         bad "SLSsteam.so has unresolved symbols/versions on this host"
         return 1
     fi
@@ -570,6 +577,118 @@ check_slssteam_runtime_deps() {
     return 0
 }
 
+
+read_manifest_install_path() {
+    local manifest="$1"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$manifest" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    val = data.get("installPath", "")
+    if isinstance(val, str):
+        print(val)
+except Exception:
+    pass
+PY
+        return 0
+    fi
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.installPath // empty' "$manifest" 2>/dev/null || true
+        return 0
+    fi
+    sed -n 's/.*"installPath"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$manifest" 2>/dev/null \
+        | head -n 1 | sed 's|\\\/|/|g' || true
+}
+
+# Read-only Proton diagnostic: never modifies files or blocks readiness exit code.
+check_proton_state() {
+    local pvars_raw pvar pvars="" conf conf_name line trimmed key val env_d_hits=0
+    local fix_dir="$LUMEN_FIX_INSTALLS_DIR"
+    local manifest appid install_path dll_file dll_count found_manifests=0
+
+    printf '%s\n' "-- proton --"
+
+    if [ "${WINEDLLOVERRIDES+x}" = "x" ]; then
+        if [ -n "$WINEDLLOVERRIDES" ]; then
+            dim "env: WINEDLLOVERRIDES=$WINEDLLOVERRIDES"
+        else
+            dim "env: WINEDLLOVERRIDES=\"\" (set, empty)"
+        fi
+    else
+        dim "env: WINEDLLOVERRIDES unset"
+    fi
+
+    pvars_raw="$(compgen -e PROTON_ 2>/dev/null || true)"
+    if [ -n "$pvars_raw" ]; then
+        while IFS= read -r pvar; do
+            [ -n "$pvar" ] || continue
+            pvars="${pvars:+$pvars }$pvar=${!pvar}"
+        done <<<"$pvars_raw"
+    fi
+    if [ -n "$pvars" ]; then
+        dim "env: $pvars"
+    else
+        dim "env: no PROTON_* variables set"
+    fi
+
+    if [ -d "$ENV_D_DIR" ]; then
+        for conf in "$ENV_D_DIR"/*.conf; do
+            [ -f "$conf" ] || continue
+            conf_name="${conf##*/}"
+            while IFS= read -r line || [ -n "$line" ]; do
+                line="${line%$'\r'}"
+                trimmed="${line#"${line%%[![:space:]]*}"}"
+                case "$trimmed" in
+                    ''|'#'*) continue ;;
+                    WINEDLLOVERRIDES=*|PROTON_*=*)
+                        key="${trimmed%%=*}"
+                        val="${trimmed#*=}"
+                        dim "environment.d ($conf_name): $key=$val"
+                        env_d_hits=$((env_d_hits + 1))
+                        ;;
+                esac
+            done < "$conf"
+        done
+    fi
+    if [ "$env_d_hits" -eq 0 ]; then
+        dim "environment.d: no WINEDLLOVERRIDES or PROTON_* entries"
+    fi
+
+    if [ -d "$fix_dir" ]; then
+        for manifest in "$fix_dir"/*/manifest.json; do
+            [ -f "$manifest" ] || continue
+            found_manifests=$((found_manifests + 1))
+            appid="$(basename "$(dirname "$manifest")")"
+            install_path="$(read_manifest_install_path "$manifest")"
+            if [ -z "$install_path" ] || [ ! -d "$install_path" ]; then
+                warn "app $appid: installPath absent on disk (${install_path:-unknown})"
+                continue
+            fi
+            dll_file="$install_path/.slssteam_fix_dlls"
+            if [ -f "$dll_file" ]; then
+                dll_count=0
+                while IFS= read -r line || [ -n "$line" ]; do
+                    line="${line%$'\r'}"
+                    trimmed="${line#"${line%%[![:space:]]*}"}"
+                    [ -n "$trimmed" ] || continue
+                    dll_count=$((dll_count + 1))
+                done < "$dll_file"
+                if [ "$dll_count" -eq 0 ]; then
+                    ok "app $appid ($(basename "$install_path")): .slssteam_fix_dlls present (0 DLLs — no overrides needed)"
+                else
+                    ok "app $appid ($(basename "$install_path")): .slssteam_fix_dlls present ($dll_count DLL(s))"
+                fi
+            else
+                warn "app $appid ($(basename "$install_path")): .slssteam_fix_dlls missing (Proton DLL overrides unrecorded)"
+            fi
+        done
+    fi
+    if [ "$found_manifests" -eq 0 ]; then
+        dim "managed games: none recorded ($fix_dir)"
+    fi
+}
 cmd_doctor() {
     local problems=0 sls staged crbits dep_target="" env_val
     printf '%s\n' "-- 64-bit readiness --"
@@ -617,6 +736,8 @@ cmd_doctor() {
         dim "environment.d: STEAM_FORCE_CLIENT=$env_val"
     fi
 
+
+    check_proton_state
     printf '%s\n' "-- known 64-bit limits --"
     dim "library-inject.so (the libcurl redirect shim) has no 64-bit build. The"
     dim "64-bit client loads libcurl from its own runtime, so it is not needed."
