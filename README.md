@@ -136,11 +136,15 @@ Steam roots listed above; a Flatpak install under
 downloads the 64-bit `SLSsteam.so` from `SLSM_PREBUILT_URL`, or by default
 from the slsteam-moon-64 release asset named by `SLS64_PREBUILT_URL` in
 [`versions.env`](versions.env), and stages it without building anything. The
-release must publish `pattern-status.txt` next to the library, and
-`install.sh` checks the download as strictly as a build:
+release must publish `pattern-status.txt` next to the library, naming the
+library it was measured on, and `install.sh` checks the download as strictly
+as a build:
 
 - `<url>.sha256`, when published, must match; a mismatch stops the install.
-  Without one, `install.sh` warns that the digest is unverified.
+  Without one, `install.sh` warns and relies on the next check.
+- `pattern-status.txt` must contain exactly one `binary_sha256=` line equal to
+  the downloaded library's SHA-256, so a status file from another build cannot
+  vouch for it.
 - The file must be a 64-bit x86-64 ELF shared object.
 - `pattern-status.txt` must pass the same pattern gate as a source build.
 - Its libraries, symbol versions and glibc requirement must resolve on this
@@ -154,7 +158,8 @@ the usual requirements and the glibc >= 2.38 floor. The final summary,
 path produced `SLSsteam.so.64` and whether the active `SLSsteam.so` is it.
 
 slsteam-moon-64 has not published a release yet, so for now the default URL
-returns 404 and `--prebuilt` builds from source.
+returns 404 and `--prebuilt` builds from source. [`RELEASING.md`](RELEASING.md)
+lists what a release must contain and how to build it.
 
 ## What is in here
 
@@ -165,6 +170,7 @@ returns 404 and `--prebuilt` builds from source.
 | `bin/wrapper.64.sh` | the 64-bit Steam launcher (what `SLSsteam/path/steam` becomes) |
 | `bin/moon64` | `on` / `off` / `status` / `doctor` switcher |
 | `install.sh` | stages every 64-bit piece; activates nothing |
+| `RELEASING.md` | what a slsteam-moon-64 release must contain for `--prebuilt` |
 | `versions.env` | pinned sources: the slsteam-moon-64, Lumen and LuaTools forks, the CloudRedirect commit, the prebuilt `SLSsteam.so` URL and the 32-bit rollback release |
 
 ## Why a switcher instead of one wrapper

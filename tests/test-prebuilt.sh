@@ -53,8 +53,10 @@ make_elf32() {
 COMPLETE=$'arch=x86_64\nrequired=38\nresolved=38\npending=0\nrunipcframe_tail=ready'
 PENDING=$'arch=x86_64\nrequired=38\nresolved=21\npending=17\nrunipcframe_tail=ready'
 
-# make_release <name> [no-sha|bad-sha|no-status|pending|elf32] — a release
-# directory laid out like the project's GitHub release assets.
+# make_release <name> [no-sha|bad-sha|no-status|pending|elf32|unbound|stale] —
+# a release directory laid out like the project's GitHub release assets. Its
+# pattern-status.txt names the library it describes (binary_sha256=) unless the
+# variant is unbound (no such line) or stale (measured on another build).
 make_release() {
     local d="$TMP_ROOT/rel-$1" variant="${2:-}"
     mkdir -p "$d"
@@ -70,8 +72,10 @@ make_release() {
     esac
     case "$variant" in
         no-status) ;;
-        pending) printf '%s\n' "$PENDING" > "$d/pattern-status.txt" ;;
-        *) printf '%s\n' "$COMPLETE" > "$d/pattern-status.txt" ;;
+        pending) printf '%s\nbinary_sha256=%s\n' "$PENDING" "$(sha "$d/SLSsteam.so")" > "$d/pattern-status.txt" ;;
+        unbound) printf '%s\n' "$COMPLETE" > "$d/pattern-status.txt" ;;
+        stale) printf '%s\nbinary_sha256=%s\n' "$COMPLETE" "$(sha "$REPO_ROOT/install.sh")" > "$d/pattern-status.txt" ;;
+        *) printf '%s\nbinary_sha256=%s\n' "$COMPLETE" "$(sha "$d/SLSsteam.so")" > "$d/pattern-status.txt" ;;
     esac
     printf '%s' "$d"
 }
@@ -117,6 +121,7 @@ sb="$(make_sandbox a)"
 out="$(in_sandbox "$sb" SLSM_PREBUILT_URL="file://$rel/SLSsteam.so" bash "$REPO_ROOT/install.sh" --prebuilt 2>&1)"; rc=$?
 assert_rc "a1: --prebuilt install succeeds" 0 "$rc" "$out"
 assert_contains "a1: digest verified" "prebuilt sha256 matches file://$rel/SLSsteam.so.sha256" "$out"
+assert_contains "a1: status file bound to the binary" "pattern-status.txt was measured on this SLSsteam.so (binary_sha256 $(sha "$rel/SLSsteam.so"))" "$out"
 assert_contains "a1: pattern gate ran on the release" "x86_64 pattern table complete" "$out"
 assert_same "a1: staged the downloaded library" "$rel/SLSsteam.so" "$sb/moon64/SLSsteam.so.64"
 assert_absent "a1: did not build" "$sb/make-ran"
@@ -147,14 +152,23 @@ rel="$(make_release b no-sha)"
 sb="$(make_sandbox b)"
 out="$(in_sandbox "$sb" SLSM_PREBUILT_URL="file://$rel/SLSsteam.so" bash "$REPO_ROOT/install.sh" --prebuilt 2>&1)"; rc=$?
 assert_rc "b1: install succeeds without a .sha256" 0 "$rc" "$out"
-assert_contains "b1: warns the digest is unverified" "no file://$rel/SLSsteam.so.sha256 published; the prebuilt's digest is not verified" "$out"
+assert_contains "b1: warns there is no .sha256" "no file://$rel/SLSsteam.so.sha256 published; the download is only checked against the binary_sha256 in pattern-status.txt" "$out"
+assert_contains "b1: still checked against the status binding" "pattern-status.txt was measured on this SLSsteam.so" "$out"
 assert_same "b1: staged the downloaded library" "$rel/SLSsteam.so" "$sb/moon64/SLSsteam.so.64"
 assert_contains "b1: state records no published digest" "no" "$(state_of "$sb" sha256_published)"
 out="$(in_sandbox "$sb" bash "$sb/moon64/moon64" doctor 2>&1)"
-assert_contains "b2: doctor repeats it" "(no published sha256 to verify against)" "$out"
+assert_contains "b2: doctor repeats it" "(no .sha256 published; checked against pattern-status.txt only)" "$out"
+
+# b3: no .sha256 and a status file from another build: nothing vouches for it
+rel="$(make_release b3 no-sha)"
+printf '%s\nbinary_sha256=%s\n' "$COMPLETE" "$(sha "$REPO_ROOT/install.sh")" > "$rel/pattern-status.txt"
+sb="$(make_sandbox b3)"
+out="$(in_sandbox "$sb" SLSM_PREBUILT_URL="file://$rel/SLSsteam.so" bash "$REPO_ROOT/install.sh" --prebuilt 2>&1)"; rc=$?
+assert_rc "b3: unsigned release with a stale status file stops" 1 "$rc" "$out"
+assert_absent "b3: nothing staged" "$sb/moon64/SLSsteam.so.64"
 
 # --- (c) failed checks stop the install; nothing staged, nothing built -----
-for variant in bad-sha elf32 pending; do
+for variant in bad-sha elf32 pending unbound stale; do
     rel="$(make_release "c-$variant" "$variant")"
     sb="$(make_sandbox "c-$variant")"
     out="$(in_sandbox "$sb" SLSM_PREBUILT_URL="file://$rel/SLSsteam.so" bash "$REPO_ROOT/install.sh" --prebuilt 2>&1)"; rc=$?
@@ -163,6 +177,9 @@ for variant in bad-sha elf32 pending; do
         bad-sha) assert_contains "c-$variant: says why" "does not match the published 0000" "$out" ;;
         elf32)   assert_contains "c-$variant: says why" "prebuilt SLSsteam.so is not a 64-bit x86-64 shared object" "$out" ;;
         pending) assert_contains "c-$variant: says why" "refusing the prebuilt: its pattern table is incomplete" "$out" ;;
+        unbound) assert_contains "c-$variant: says why" "must name the SLSsteam.so it was measured on with exactly one binary_sha256= line" "$out" ;;
+        stale)   assert_contains "c-$variant: says why" "pattern-status.txt was measured on SLSsteam.so $(sha "$REPO_ROOT/install.sh"), not on the downloaded" "$out"
+                 assert_not_contains "c-$variant: gate never consulted" "x86_64 pattern table complete" "$out" ;;
     esac
     assert_contains "c-$variant: refuses instead of falling back" "refusing to stage an unverified prebuilt SLSsteam.so" "$out"
     assert_absent "c-$variant: nothing staged" "$sb/moon64/SLSsteam.so.64"

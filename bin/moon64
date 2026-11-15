@@ -1429,7 +1429,7 @@ report_sls64_origin() {
             prebuilt)
                 origin="prebuilt, downloaded from $(sed -n 's/^url=//p' "$state" | tail -n1)"
                 [ "$(sed -n 's/^sha256_published=//p' "$state" | tail -n1)" = yes ] \
-                    || origin="$origin (no published sha256 to verify against)"
+                    || origin="$origin (no .sha256 published; checked against pattern-status.txt only)"
                 ;;
             built)
                 origin="built from source at $(sed -n 's/^src=//p' "$state" | tail -n1) @ $(sed -n 's/^commit=//p' "$state" | tail -n1)"

@@ -501,10 +501,11 @@ write_sls64_state() {
 
 # fetch_prebuilt — stage the prebuilt x86_64 SLSsteam.so published at
 # $SLSM_PREBUILT_URL (default SLS64_PREBUILT_URL) as $MOON_DIR/SLSsteam.so.64.
-# The release must carry pattern-status.txt next to the library, and the same
-# gate as a source build applies to it; <url>.sha256 is verified when published.
-# Returns 1 when the library or its pattern status cannot be downloaded (the
-# caller builds from source instead), 2 when a downloaded file fails a check.
+# The release must carry pattern-status.txt next to the library, naming the
+# library it was measured on (binary_sha256=), and the same gate as a source
+# build applies to it; <url>.sha256 is verified when published. Returns 1 when
+# the library or its pattern status cannot be downloaded (the caller builds
+# from source instead), 2 when a downloaded file fails a check.
 fetch_prebuilt() {
     local rc
     PREBUILT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/moon64-prebuilt.XXXXXX")" \
@@ -517,8 +518,23 @@ fetch_prebuilt() {
     return "$rc"
 }
 
+# status_binary_sha256 <pattern-status.txt> — print its one binary_sha256=
+# value, lowercased; fails when the key is absent or repeated.
+status_binary_sha256() {
+    local line trimmed val="" seen=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        case "$trimmed" in
+            binary_sha256=*) seen=$((seen + 1)); val="${trimmed#binary_sha256=}" ;;
+        esac
+    done < "$1"
+    [ "$seen" -eq 1 ] || return 1
+    printf '%s' "${val,,}"
+}
+
 fetch_prebuilt_into() {
-    local tmp="$1" url="${SLSM_PREBUILT_URL:-${SLS64_PREBUILT_URL:-}}" got want="" info verified=no
+    local tmp="$1" url="${SLSM_PREBUILT_URL:-${SLS64_PREBUILT_URL:-}}" got want="" bound info verified=no
     [ -n "$url" ] || { warn "no prebuilt URL configured (SLSM_PREBUILT_URL)"; return 1; }
     mkdir -p "$tmp/res" || return 1
 
@@ -547,7 +563,7 @@ fetch_prebuilt_into() {
         ok "prebuilt sha256 matches $url.sha256"
         verified=yes
     else
-        warn "no $url.sha256 published; the prebuilt's digest is not verified"
+        warn "no $url.sha256 published; the download is only checked against the binary_sha256 in pattern-status.txt"
     fi
 
     info="$(file -b "$tmp/SLSsteam.so" 2>/dev/null || true)"
@@ -555,6 +571,20 @@ fetch_prebuilt_into() {
         'ELF 64-bit LSB shared object, x86-64'*) ;;
         *) bad "prebuilt SLSsteam.so is not a 64-bit x86-64 shared object: ${info:-unreadable}"; return 2 ;;
     esac
+
+    # The pattern gate trusts the counts in pattern-status.txt, which are only
+    # evidence about the library they were measured on. A status file from
+    # another build (an older tag, an asset replaced on its own, a latest/
+    # download that moved between requests) must not vouch for this one.
+    if ! bound="$(status_binary_sha256 "$tmp/res/pattern-status.txt")"; then
+        bad "${url%/*}/pattern-status.txt must name the SLSsteam.so it was measured on with exactly one binary_sha256= line"
+        return 2
+    fi
+    if [ "$bound" != "$got" ]; then
+        bad "${url%/*}/pattern-status.txt was measured on SLSsteam.so ${bound:-<empty>}, not on the downloaded $got"
+        return 2
+    fi
+    ok "pattern-status.txt was measured on this SLSsteam.so (binary_sha256 $got)"
 
     check_pattern_gate "$tmp" || { bad "refusing the prebuilt: its pattern table is incomplete"; return 2; }
     probe_slssteam_deps "$tmp/SLSsteam.so"
