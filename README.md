@@ -10,6 +10,104 @@ function it patches is not present in `ubuntu12_32/steamclient.so` at all, so
 co-op joins that need P2P (Satisfactory, REPO, …) fail no matter how the rest of
 the stack is configured. 64-bit is the only client where that path exists.
 
+## Licence
+
+AGPL-3.0 — see [`LICENSE`](LICENSE).
+
+- **Derived work in this repo:** `bin/wrapper.64.sh` is derived from
+  SLSsteam v2.9's `path/steam` wrapper (AGPL-3.0), which is why the whole
+  repo is AGPL-3.0.
+- **Built on your machine at install time, not redistributed here:** the
+  64-bit `SLSsteam.so` (from
+  [slsteam-moon-64](https://github.com/KadirBerkpolat1/slsteam-moon-64),
+  AGPL-3.0-only), CloudRedirect (from
+  [swwayps/cloudredirect-moon](https://github.com/swwayps/cloudredirect-moon),
+  only with `--with-cloudredirect`), and the Lumen and LuaTools fork trees
+  (only with `--with-lumen-patch`). Each is cloned from the pin in
+  [`versions.env`](versions.env) and keeps its own licence.
+  `netsock64.so` is built from this repo's own source.
+
+## Quickstart
+
+On a clean machine, do these first:
+
+1. Install the **native** Steam client (not Flatpak) and start it once, so it
+   downloads its 64-bit client into `steamrt64/`.
+2. Install upstream [SLSsteam](https://github.com/AceSLS/SLSsteam) (the 32-bit
+   release) by following its README, and check that Steam starts with it.
+   moon64 hooks into SLSsteam's launcher (`~/.local/share/SLSsteam/path/steam`),
+   and that 32-bit install is the only thing `moon64 off` can return to — see
+   [Rollback](#rollback).
+3. Optional: install [Lumen](https://github.com/swwayps/lumen) if you want
+   `--with-lumen-patch`, and the 32-bit CloudRedirect if you want cloud saves.
+4. Install everything in [Requirements](#requirements).
+
+Then close Steam, or let the installer close it for you: it stops an idle
+Steam client itself (`moon64 stop-steam`) and refuses only while a game is
+running.
+
+```sh
+git clone https://github.com/KadirBerkpolat1/moon64.git
+cd moon64
+./install.sh
+~/.local/share/moon64/moon64 doctor
+~/.local/share/moon64/moon64 on
+```
+
+`install.sh` only stages files; the 32-bit stack stays live until `moon64 on`.
+`moon64 doctor` is the pre-flight: fix everything it reports as bad before
+running `moon64 on`. After `on`, start Steam normally.
+
+Optional pieces are flags to the same installer:
+
+```sh
+./install.sh --with-cloudredirect --with-lumen-patch
+```
+
+## Requirements
+
+| Requirement | Needed for | Checked by |
+|---|---|---|
+| Linux x86_64 with **glibc >= 2.38** | building and loading the 64-bit `SLSsteam.so` (C++20 `__isoc23_strto*`) | `install.sh` refuses older glibc |
+| Native Steam in `~/.steam/steam`, `~/.local/share/Steam` or `~/.steam/debian-installation`, with `steamrt64/steam` and `steamrt64/steamclient.so` present | the 64-bit client | `moon64 doctor` |
+| Upstream 32-bit SLSsteam, already installed | the launcher hook and the rollback target | not checked — see [Rollback](#rollback) |
+| Running as your desktop user, not root | file ownership under `~/.local/share` | `install.sh` |
+| `git`, `curl`, `file`, `readelf` (binutils), `ldd` | fetching sources, ELF checks | `install.sh` |
+| `gcc`, `g++` (C++20), `make` | building `netsock64.so` and `SLSsteam.so` | `install.sh` |
+| libcurl and OpenSSL development headers | building `SLSsteam.so` | `install.sh` |
+| 64-bit `libdbus-1.so.3` and a `libstdc++` with `GLIBCXX_3.4.32` (GCC 13+) | loading `SLSsteam.so` in the client | `install.sh`, `moon64 doctor` |
+| 64-bit `libcurl.so.4` | SLSsteam's network features (loaded at runtime) | `install.sh` (warning only) |
+| `cmake` | `--with-cloudredirect` only | `bin/build-cloudredirect.sh` |
+| An installed Lumen (`~/.local/share/Lumen/lua`) | `--with-lumen-patch` only | `install.sh` (skips with a warning) |
+| `pkg-config` | optional | `install.sh` (note only) |
+
+Check the glibc floor:
+
+```sh
+getconf GNU_LIBC_VERSION
+```
+
+Arch Linux and derivatives:
+
+```sh
+sudo pacman -S --needed base-devel git curl openssl file binutils dbus cmake
+```
+
+On Debian/Ubuntu or Fedora, install your compiler toolchain, `git`, `curl`,
+`file` and binutils, plus the headers the installer asks for:
+
+```sh
+sudo apt-get install -y libcurl4-openssl-dev libssl-dev
+```
+
+```sh
+sudo dnf install -y libcurl-devel openssl-devel
+```
+
+**Flatpak Steam is not supported.** moon64 only looks in the three native
+Steam roots listed above; a Flatpak install under
+`~/.var/app/com.valvesoftware.Steam` is never found.
+
 ## What is in here
 
 | path | what it is |
@@ -19,7 +117,7 @@ the stack is configured. 64-bit is the only client where that path exists.
 | `bin/wrapper.64.sh` | the 64-bit Steam launcher (what `SLSsteam/path/steam` becomes) |
 | `bin/moon64` | `on` / `off` / `status` / `doctor` switcher |
 | `install.sh` | stages every 64-bit piece; activates nothing |
-| `patch/lumen/` | LuaTools `fixinstall.lua` + its menu hook (OnlineFix → `FakeAppIds`) |
+| `versions.env` | pinned sources: the slsteam-moon-64, Lumen and LuaTools forks and the CloudRedirect commit |
 
 ## Why a switcher instead of one wrapper
 
@@ -32,29 +130,16 @@ That is why `install.sh` only ever *stages* files and `moon64 on|off` is the
 only thing that changes which side is live. Every artifact the 64-bit side needs
 is already on disk before it is used, so recovery never depends on the network.
 
-## Usage
-
-```sh
-./install.sh                      # stage the 64-bit pieces (32-bit stays live)
-./install.sh --with-cloudredirect # ...and build + stage the CloudRedirect pair
-~/.local/share/moon64/moon64 doctor
-~/.local/share/moon64/moon64 on    # switch; then start Steam normally
-~/.local/share/moon64/moon64 off   # byte-exact return to the 32-bit stack
-```
-
-`off` restores the saved `<file>.32` originals and the saved wrapper, so the
-pre-migration state comes back exactly — verified by hash, not by intent.
-
 ## Component matrix
 
 | component | 32-bit client | 64-bit client |
 |---|---|---|
-| `SLSsteam.so` | upstream release | upstream release (`SLSsteam-Any-release.7z`) |
+| `SLSsteam.so` | upstream release | built from source at install time (slsteam-moon-64, pinned in `versions.env`) |
 | `netsock64.so` (P2P cert patch) | **impossible** — anchor absent | built here |
 | `library-inject.so` (libcurl redirect) | required | **dropped** — the 64-bit client brings its own libcurl |
 | `lib32/libcrypto.so.1.1` | SHA-1 workaround | **dropped** — 32-bit only, irrelevant |
 | `cloud_redirect.so` (cloud saves) | upstream prebuilt | built here with `-DLINUX_32BIT=OFF` |
-| LuaTools `fixinstall.lua` | ours | ours — arch independent |
+| Lumen fixes menu (`fixinstall.lua`) | Lumen fork tree, `--with-lumen-patch` | same tree — arch independent |
 
 The two dropped pieces are the whole reason this is not a one-line change: they
 exist only to work around 32-bit defects, and both are actively wrong for a
@@ -96,6 +181,19 @@ to re-derive them for a new client build.
 ~/.local/share/moon64/moon64 off
 ```
 
-Restores `SLSsteam.so.32`, the CloudRedirect `.32` pair and the original wrapper,
-and re-asserts the 32-bit client markers. `install.sh` never overwrites an
-existing `.32` original, so repeated `on`/`off` cycles cannot degrade it.
+`off` restores `SLSsteam.so.32`, the CloudRedirect `.32` pair and the original
+wrapper, re-asserts the 32-bit client markers, and checks each restored file
+byte for byte against its saved copy. `install.sh` never overwrites an existing
+`.32` original, so repeated `on`/`off` cycles cannot degrade it.
+
+Rollback is only possible if a 32-bit SLSsteam was installed **before** moon64.
+`install.sh` and `moon64 on` save `SLSsteam.so.32` only when a 32-bit
+`SLSsteam.so` is already in `~/.local/share/SLSsteam`. On a machine that never
+had one there is nothing to go back to, and `off` refuses:
+
+```
+fail  cannot restore 32-bit stack: /home/you/.local/share/SLSsteam/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit
+```
+
+To get a rollback target, install upstream SLSsteam first (step 2 of the
+[Quickstart](#quickstart)), then run `install.sh` and `moon64 on`.

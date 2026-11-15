@@ -106,10 +106,10 @@ objdump -d --start-address=<rodata_vaddr-0x2000> \
 
 # 4. verify it is unique over the whole file before trusting it
 python3 - <<'PY'
-import sys
+import os, sys
 anchor = bytes([0x41,0x54,0x49,0x89,0xF4,0x55,0x48,0x89,0xCD,0x53,0x44,0x8B,0x47,0x28,0x89,0xD3,0x45,0x85,0xC0,0x0F,0x85])
 data = open(sys.argv[1] if len(sys.argv)>1 else
-    '/home/user/.local/share/Steam/steamrt64/steamclient.so','rb').read()
+    os.path.expandvars('$HOME/.local/share/Steam/steamrt64/steamclient.so'),'rb').read()
 print('matches:', data.count(anchor))
 PY
 ```
