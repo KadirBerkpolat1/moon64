@@ -4,8 +4,9 @@
 `SLSsteam.so` and `netsock64.so` from a release of
 [slsteam-moon-64](https://github.com/KadirBerkpolat1/slsteam-moon-64) instead of
 compiling them. moon64 only consumes that release; it is built and published
-from slsteam-moon-64. Until a release exists, `--prebuilt` reports the failed
-download and builds from source.
+from slsteam-moon-64. The current release, `v1.0.0`, publishes `SLSsteam.so`,
+`SLSsteam.so.sha256` and `pattern-status.txt` (with `binary_sha256=` and no
+`netsock64_sha256=` line), but not `netsock64.so` or `netsock64.so.sha256`.
 
 The default URL is `SLS64_PREBUILT_URL` in [`versions.env`](versions.env):
 

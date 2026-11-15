@@ -13,10 +13,11 @@
 #                          ~/.local/share/Lumen/ (fixes menu, FakeAppId swap)
 #   --install-deps         install missing prerequisites with the distro package
 #                          manager (pacman, apt-get, dnf) through `sudo -n`
-#   --prebuilt             download the prebuilt x86_64 SLSsteam.so and
-#                          netsock64.so ($SLSM_PREBUILT_URL, default in
-#                          versions.env) instead of building them, so no
-#                          compiler is needed; falls back to the source build
+#   --prebuilt             download the prebuilt x86_64 SLSsteam.so, and
+#                          netsock64.so when the release has it
+#                          ($SLSM_PREBUILT_URL, default in versions.env),
+#                          instead of compiling them; builds SLSsteam.so from
+#                          source only if the prebuilt cannot be downloaded
 #
 # Layout it produces:
 #   ~/.local/share/moon64/SLSsteam.so.64        staged 64-bit SLSsteam

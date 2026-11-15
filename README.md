@@ -32,10 +32,10 @@ AGPL-3.0 — see [`LICENSE`](LICENSE).
   (AGPL-3.0), only when no 32-bit SLSsteam is installed, as the rollback
   target. Pinned with its SHA-256 in [`versions.env`](versions.env).
   With `--prebuilt` (which is what the [one-liner](#quickstart) runs), also the
-  64-bit `SLSsteam.so` and `netsock64.so` release assets of
+  64-bit `SLSsteam.so` release asset of
   [slsteam-moon-64](https://github.com/KadirBerkpolat1/slsteam-moon-64)
-  (AGPL-3.0-only) instead of building them — see
-  [Prebuilt binaries](#prebuilt-binaries).
+  (AGPL-3.0-only) instead of building it, and `netsock64.so` when the release
+  publishes it — see [Prebuilt binaries](#prebuilt-binaries).
 
 ## Quickstart
 
@@ -51,10 +51,13 @@ curl -fsSL https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/get.sh 
 [`get.sh`](get.sh) downloads `install.sh`, `bin/moon64`, `bin/wrapper.64.sh`
 and `versions.env` with `curl` into a temporary directory, prints each URL
 and SHA-256, and runs `install.sh --prebuilt` from there. That downloads the
-prebuilt `SLSsteam.so` and `netsock64.so` and verifies both (see
-[Prebuilt binaries](#prebuilt-binaries)): no `git`, no compiler. It stops an
-idle Steam client itself (`moon64 stop-steam`) and refuses only while a game
-is running.
+prebuilt `SLSsteam.so` from the latest slsteam-moon-64 release and verifies it
+(see [Prebuilt binaries](#prebuilt-binaries)): no `git`, no compiler. It
+verifies the release's `netsock64.so` the same way when the release carries
+one, but today's release, `v1.0.0`, carries only `SLSsteam.so`: a binary
+install today runs without the P2P cert patch, and the install says so. It
+stops an idle Steam client itself (`moon64 stop-steam`) and refuses only while
+a game is running.
 
 `get.sh` never installs packages. If prerequisites are missing it shows them
 with the package-manager command, and the re-run that lets `install.sh`
@@ -111,11 +114,12 @@ you.
 ## Requirements
 
 The binary install (`get.sh`, or `install.sh --prebuilt`) needs **no compiler
-and no `git`**: `SLSsteam.so` and `netsock64.so` come from the release. A source
-build still needs them because it compiles both on this machine: `SLSsteam.so`
-from the C++20 slsteam-moon-64 source (cloned with `git`, built with `make` and
-`g++` against the libcurl and OpenSSL headers), and `netsock64.so` from
-`patches/netsock64/steamclient_audit64.c` with `gcc`.
+and no `git`**: `SLSsteam.so` comes from the release, and so does
+`netsock64.so` when the release publishes it. Today's release does not (see
+the `gcc` row). A source build still needs them because it compiles both on
+this machine: `SLSsteam.so` from the C++20 slsteam-moon-64 source (cloned with
+`git`, built with `make` and `g++` against the libcurl and OpenSSL headers), and
+`netsock64.so` from `patches/netsock64/steamclient_audit64.c` with `gcc`.
 
 | Requirement | Needed for | Checked by |
 |---|---|---|
@@ -195,18 +199,22 @@ publish `pattern-status.txt` next to the libraries, naming both, and
   resolve on this host.
 
 A failed check stops the install, with nothing staged. When `SLSsteam.so` or
-its `pattern-status.txt` cannot be downloaded (offline, or no release
-published yet), `install.sh` says so and builds from source instead, under
-the usual requirements and the glibc >= 2.38 floor. When the release has no
-`netsock64.so`, it is built from `patches/netsock64` if `gcc` is installed;
-otherwise the install still succeeds and says that the P2P cert patch is
-inactive. The final summary, `~/.local/share/moon64/slsteam64.state`,
+its `pattern-status.txt` cannot be downloaded (for example offline),
+`install.sh` says so and builds from source instead, under the usual
+requirements and the glibc >= 2.38 floor. When the release has no
+`netsock64.so`, it is built from `patches/netsock64` if that source and `gcc`
+are present; otherwise the install still succeeds and says that the P2P cert
+patch is inactive. The final summary, `~/.local/share/moon64/slsteam64.state`,
 `netsock64.state` and `moon64 doctor` all say where each binary came from.
 
-slsteam-moon-64 has not published a release yet, so for now the default URL
-returns 404 and `--prebuilt` (and with it `get.sh`) falls back to the source
-build. [`RELEASING.md`](RELEASING.md) lists what a release must contain and
-how to build it.
+The current release, slsteam-moon-64
+[`v1.0.0`](https://github.com/KadirBerkpolat1/slsteam-moon-64/releases/tag/v1.0.0)
+(marked Latest), publishes `SLSsteam.so`, `SLSsteam.so.sha256` and
+`pattern-status.txt`, so `--prebuilt` stages the prebuilt `SLSsteam.so` after
+the checks above. It does not publish `netsock64.so`, so a binary install today
+has no P2P cert patch unless `patches/netsock64` and `gcc` are both present.
+[`RELEASING.md`](RELEASING.md) lists what a release must contain and how to
+build it.
 
 ## What is in here
 
