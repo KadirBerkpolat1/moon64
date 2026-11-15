@@ -13,14 +13,16 @@
 #                          ~/.local/share/Lumen/ (fixes menu, FakeAppId swap)
 #   --install-deps         install missing prerequisites with the distro package
 #                          manager (pacman, apt-get, dnf) through `sudo -n`
-#   --prebuilt             download the prebuilt x86_64 SLSsteam.so
-#                          ($SLSM_PREBUILT_URL, default in versions.env) instead
-#                          of building it; falls back to the source build
+#   --prebuilt             download the prebuilt x86_64 SLSsteam.so and
+#                          netsock64.so ($SLSM_PREBUILT_URL, default in
+#                          versions.env) instead of building them, so no
+#                          compiler is needed; falls back to the source build
 #
 # Layout it produces:
 #   ~/.local/share/moon64/SLSsteam.so.64        staged 64-bit SLSsteam
 #   ~/.local/share/moon64/slsteam64.state       prebuilt or built, and from where
-#   ~/.local/share/moon64/netsock64.so          cert patch, built here
+#   ~/.local/share/moon64/netsock64.so          cert patch: the release's with --prebuilt, else built here
+#   ~/.local/share/moon64/netsock64.state       prebuilt or built, and from where
 #   ~/.local/share/moon64/wrapper.64.sh         the 64-bit Steam wrapper
 #   ~/.local/share/moon64/moon64                the switcher
 #   ~/.local/share/SLSsteam/SLSsteam.so.32      32-bit SLSsteam for rollback: the one
@@ -485,18 +487,19 @@ probe_slssteam_deps() {
     ok "SLSsteam.so runtime dependencies satisfied ($(printf '%s' "$needed" | tr '\n' ' ' | sed 's/ $//'))"
 }
 
-# write_sls64_state <source> [key=value...] — record where SLSsteam.so.64 came
-# from, for the install summary and `moon64 doctor`.
-write_sls64_state() {
-    local src="$1" kv
-    shift
+# write_origin_state <staged file> <state file> <source> [key=value...] —
+# record where a staged binary came from, for the install summary and
+# `moon64 doctor`.
+write_origin_state() {
+    local f="$1" state="$2" src="$3" kv
+    shift 3
     {
-        printf '# Written by moon64 install.sh: origin of SLSsteam.so.64.\n'
+        printf '# Written by moon64 install.sh: origin of %s.\n' "${f##*/}"
         printf 'source=%s\n' "$src"
         for kv in "$@"; do printf '%s\n' "$kv"; done
-        printf 'sha256=%s\n' "$(sha256sum "$MOON_DIR/SLSsteam.so.64" | cut -d' ' -f1)"
+        printf 'sha256=%s\n' "$(sha256sum "$f" | cut -d' ' -f1)"
         printf 'staged=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    } > "$MOON_DIR/slsteam64.state" || warn "cannot write $MOON_DIR/slsteam64.state"
+    } > "$state" || warn "cannot write $state"
 }
 
 # fetch_prebuilt — stage the prebuilt x86_64 SLSsteam.so published at
@@ -505,7 +508,10 @@ write_sls64_state() {
 # library it was measured on (binary_sha256=), and the same gate as a source
 # build applies to it; <url>.sha256 is verified when published. Returns 1 when
 # the library or its pattern status cannot be downloaded (the caller builds
-# from source instead), 2 when a downloaded file fails a check.
+# from source instead), 2 when a downloaded file fails a check; then
+# PREBUILT_REFUSED names the file and nothing has been staged.
+# A verified netsock64.so from the same release is left in $PREBUILT_TMP as
+# NETSOCK64_PREBUILT: it is only staged once Steam is stopped (section 2).
 fetch_prebuilt() {
     local rc
     PREBUILT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/moon64-prebuilt.XXXXXX")" \
@@ -513,28 +519,90 @@ fetch_prebuilt() {
     trap 'rm -rf "$PREBUILT_TMP"' EXIT
     fetch_prebuilt_into "$PREBUILT_TMP"
     rc=$?
-    rm -rf "$PREBUILT_TMP"
-    trap - EXIT
+    [ -n "$NETSOCK64_PREBUILT" ] || drop_prebuilt_tmp
     return "$rc"
 }
 
-# status_binary_sha256 <pattern-status.txt> — print its one binary_sha256=
-# value, lowercased; fails when the key is absent or repeated.
-status_binary_sha256() {
-    local line trimmed val="" seen=0
+drop_prebuilt_tmp() {
+    [ -z "${PREBUILT_TMP:-}" ] || rm -rf "$PREBUILT_TMP"
+    PREBUILT_TMP=""
+    trap - EXIT
+}
+
+# status_sha256 <pattern-status.txt> <key> — print its one <key>= value,
+# lowercased; fails when the key is absent or repeated.
+status_sha256() {
+    local key="$2" line trimmed val="" seen=0
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%$'\r'}"
         trimmed="${line#"${line%%[![:space:]]*}"}"
         case "$trimmed" in
-            binary_sha256=*) seen=$((seen + 1)); val="${trimmed#binary_sha256=}" ;;
+            "$key"=*) seen=$((seen + 1)); val="${trimmed#"$key"=}" ;;
         esac
     done < "$1"
     [ "$seen" -eq 1 ] || return 1
     printf '%s' "${val,,}"
 }
 
+# fetch_netsock64_into <tmp> <release dir url> — download the release's
+# netsock64.so into <tmp> and check it the way SLSsteam.so is checked: its
+# .sha256 when published, the x86-64 ELF class, and the one netsock64_sha256=
+# line in <tmp>/res/pattern-status.txt. Returns 0 when it passes, 1 when the
+# release has none to download, 2 when a check fails.
+fetch_netsock64_into() {
+    local tmp="$1" rel="$2" got want="" bound info
+    NETSOCK64_URL="$rel/netsock64.so"
+    NETSOCK64_SHA_PUBLISHED=no
+    if ! curl -fsSL --connect-timeout 15 --max-time 60 -o "$tmp/netsock64.so" "$NETSOCK64_URL" 2>/dev/null; then
+        rm -f "$tmp/netsock64.so"
+        if status_sha256 "$tmp/res/pattern-status.txt" netsock64_sha256 >/dev/null; then
+            warn "cannot download $NETSOCK64_URL, although $rel/pattern-status.txt names one"
+        else
+            dim "the release has no $NETSOCK64_URL"
+        fi
+        return 1
+    fi
+
+    got="$(sha256sum "$tmp/netsock64.so" | cut -d' ' -f1)"
+    if curl -fsSL --connect-timeout 15 --max-time 60 -o "$tmp/netsock64.so.sha256" "$NETSOCK64_URL.sha256" 2>/dev/null; then
+        read -r want _ < "$tmp/netsock64.so.sha256" || true
+        want="${want,,}"
+        if [ "${#want}" -ne 64 ] || [ -n "${want//[0-9a-f]/}" ]; then
+            bad "$NETSOCK64_URL.sha256 does not hold a SHA-256 digest"
+            return 2
+        fi
+        if [ "$want" != "$got" ]; then
+            bad "prebuilt netsock64.so sha256 $got does not match the published $want"
+            return 2
+        fi
+        ok "prebuilt netsock64.so sha256 matches $NETSOCK64_URL.sha256"
+        NETSOCK64_SHA_PUBLISHED=yes
+    else
+        warn "no $NETSOCK64_URL.sha256 published; netsock64.so is only checked against the netsock64_sha256 in pattern-status.txt"
+    fi
+
+    info="$(file -b "$tmp/netsock64.so" 2>/dev/null || true)"
+    case "$info" in
+        'ELF 64-bit LSB shared object, x86-64'*) ;;
+        *) bad "prebuilt netsock64.so is not a 64-bit x86-64 shared object: ${info:-unreadable}"; return 2 ;;
+    esac
+
+    if ! bound="$(status_sha256 "$tmp/res/pattern-status.txt" netsock64_sha256)"; then
+        bad "$rel/pattern-status.txt must name the netsock64.so released with it with exactly one netsock64_sha256= line"
+        return 2
+    fi
+    if [ "$bound" != "$got" ]; then
+        bad "$rel/pattern-status.txt names netsock64.so ${bound:-<empty>}, not the downloaded $got"
+        return 2
+    fi
+    ok "pattern-status.txt names this netsock64.so (netsock64_sha256 $got)"
+    return 0
+}
+
 fetch_prebuilt_into() {
-    local tmp="$1" url="${SLSM_PREBUILT_URL:-${SLS64_PREBUILT_URL:-}}" got want="" bound info verified=no
+    local tmp="$1" url="${SLSM_PREBUILT_URL:-${SLS64_PREBUILT_URL:-}}" got want="" bound info verified=no ns_rc
+    NETSOCK64_PREBUILT=""
+    PREBUILT_REFUSED="SLSsteam.so"
     [ -n "$url" ] || { warn "no prebuilt URL configured (SLSM_PREBUILT_URL)"; return 1; }
     mkdir -p "$tmp/res" || return 1
 
@@ -576,7 +644,7 @@ fetch_prebuilt_into() {
     # evidence about the library they were measured on. A status file from
     # another build (an older tag, an asset replaced on its own, a latest/
     # download that moved between requests) must not vouch for this one.
-    if ! bound="$(status_binary_sha256 "$tmp/res/pattern-status.txt")"; then
+    if ! bound="$(status_sha256 "$tmp/res/pattern-status.txt" binary_sha256)"; then
         bad "${url%/*}/pattern-status.txt must name the SLSsteam.so it was measured on with exactly one binary_sha256= line"
         return 2
     fi
@@ -586,10 +654,18 @@ fetch_prebuilt_into() {
     fi
     ok "pattern-status.txt was measured on this SLSsteam.so (binary_sha256 $got)"
 
+    fetch_netsock64_into "$tmp" "${url%/*}"
+    ns_rc=$?
+    if [ "$ns_rc" -eq 2 ]; then
+        PREBUILT_REFUSED="netsock64.so"
+        return 2
+    fi
+
     check_pattern_gate "$tmp" || { bad "refusing the prebuilt: its pattern table is incomplete"; return 2; }
     probe_slssteam_deps "$tmp/SLSsteam.so"
     install -m 755 "$tmp/SLSsteam.so" "$MOON_DIR/SLSsteam.so.64" || die "cannot stage SLSsteam.so.64"
-    write_sls64_state prebuilt "url=$url" "sha256_published=$verified"
+    write_origin_state "$MOON_DIR/SLSsteam.so.64" "$MOON_DIR/slsteam64.state" prebuilt "url=$url" "sha256_published=$verified"
+    [ "$ns_rc" -ne 0 ] || NETSOCK64_PREBUILT="$tmp/netsock64.so"
     return 0
 }
 
@@ -616,8 +692,10 @@ fi
 # Prerequisites, checked up front and reported as one list. Packages are only
 # installed with --install-deps, and then only through a sudo that does not ask
 # for a password: the installer never prompts for root or uses it unasked.
-# --prebuilt defers the toolchain the source build needs until it is used.
+# --prebuilt needs no compiler: both binaries come from the release, and the
+# toolchain is only asked for if the release cannot be used.
 deps_base=(curl gcc readelf file ldd)
+deps_prebuilt=(curl readelf file ldd)
 deps_build=(g++ make libcurl-headers openssl-headers)
 [ -f "$src_dir/Makefile" ] || deps_build+=(git)
 deps_opt=()
@@ -625,21 +703,22 @@ if [ ! -e "$SLS_DIR/SLSsteam.so.32" ] && { [ ! -f "$SLS_DIR/SLSsteam.so" ] || is
     deps_opt+=(bsdtar)
 fi
 if [ "$prebuilt" = 1 ]; then
-    check_deps "$install_deps" "${deps_base[@]}" -- "${deps_opt[@]}" || die "missing prerequisites"
+    check_deps "$install_deps" "${deps_prebuilt[@]}" -- "${deps_opt[@]}" || die "missing prerequisites"
 else
     check_deps "$install_deps" "${deps_base[@]}" "${deps_build[@]}" -- "${deps_opt[@]}" || die "missing prerequisites"
 fi
 
 sls64_path=""
+NETSOCK64_PREBUILT=""
 if [ "$prebuilt" = 1 ]; then
     fetch_prebuilt
     case $? in
         0)  sls64_path="prebuilt (${SLSM_PREBUILT_URL:-$SLS64_PREBUILT_URL})" ;;
-        2)  die "refusing to stage an unverified prebuilt SLSsteam.so" ;;
+        2)  die "refusing to stage an unverified prebuilt $PREBUILT_REFUSED; nothing was staged" ;;
         *)  warn "no usable prebuilt SLSsteam.so; building from source instead"
             dim "  a source build links against this host's glibc (the build needs >= 2.38)"
             dim "  and the result only runs on hosts with at least that glibc"
-            check_deps "$install_deps" "${deps_build[@]}" || die "missing build prerequisites"
+            check_deps "$install_deps" gcc "${deps_build[@]}" || die "missing build prerequisites"
             ;;
     esac
 fi
@@ -712,7 +791,7 @@ if [ -z "$sls64_path" ]; then
     probe_slssteam_deps "$src_dir/bin/SLSsteam.so"
     install -m 755 "$src_dir/bin/SLSsteam.so" "$MOON_DIR/SLSsteam.so.64" || die "cannot stage SLSsteam.so.64"
     src_commit="$(git -C "$src_dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    write_sls64_state built "src=$src_dir" "commit=$src_commit"
+    write_origin_state "$MOON_DIR/SLSsteam.so.64" "$MOON_DIR/slsteam64.state" built "src=$src_dir" "commit=$src_commit"
     sls64_path="built from source ($src_dir @ $src_commit)"
 fi
 
@@ -748,13 +827,37 @@ if [ ! -e "$SLS_DIR/SLSsteam.so.32" ]; then
 fi
 
 # --- 2. netsock64 -----------------------------------------------------------
-if [ -f "$HERE/patches/netsock64/steamclient_audit64.c" ]; then
+# Staged only now that Steam is stopped: the wrapper puts this file on the
+# LD_AUDIT of every launch. The release's verified copy when it has one, else a
+# local build, which needs gcc. Without either the install still succeeds, but
+# the P2P cert patch is inactive.
+netsock64_src="$HERE/patches/netsock64/steamclient_audit64.c"
+if [ -n "$NETSOCK64_PREBUILT" ]; then
+    install -m 755 "$NETSOCK64_PREBUILT" "$MOON_DIR/netsock64.so" || die "cannot stage netsock64.so"
+    cmp -s "$NETSOCK64_PREBUILT" "$MOON_DIR/netsock64.so" || die "staged netsock64.so differs from the verified download"
+    write_origin_state "$MOON_DIR/netsock64.so" "$MOON_DIR/netsock64.state" prebuilt \
+        "url=$NETSOCK64_URL" "sha256_published=$NETSOCK64_SHA_PUBLISHED"
+    drop_prebuilt_tmp
+    netsock64_path="prebuilt ($NETSOCK64_URL)"
+    ok "staged $MOON_DIR/netsock64.so: $netsock64_path"
+elif [ -f "$netsock64_src" ] && command -v gcc >/dev/null 2>&1; then
     gcc -O2 -Wall -Wextra -shared -fPIC \
-        -o "$MOON_DIR/netsock64.so" \
-        "$HERE/patches/netsock64/steamclient_audit64.c" -ldl || die "netsock64 build failed"
+        -o "$MOON_DIR/netsock64.so" "$netsock64_src" -ldl || die "netsock64 build failed"
+    write_origin_state "$MOON_DIR/netsock64.so" "$MOON_DIR/netsock64.state" built "src=$netsock64_src"
+    netsock64_path="built from $netsock64_src"
     ok "built $MOON_DIR/netsock64.so"
 else
-    warn "patches/netsock64 missing; the P2P cert patch will be inactive"
+    if [ -f "$netsock64_src" ]; then why="gcc is not installed to build it"; else why="this copy of moon64 has no patches/netsock64 to build it from"; fi
+    [ "$prebuilt" = 1 ] && why="the release has no netsock64.so and $why"
+    if [ -f "$MOON_DIR/netsock64.so" ]; then
+        warn "$why; keeping the netsock64.so from an earlier install"
+        netsock64_path="kept from an earlier install"
+    else
+        warn "$why: the P2P cert patch will be inactive"
+        dim "  this is a degraded feature, not a failed install: Steam, SLSsteam and"
+        dim "  LuaTools work, but co-op joins that need peer-to-peer (Satisfactory, REPO) fail"
+        netsock64_path="none (the P2P cert patch is inactive)"
+    fi
 fi
 
 # --- 3. wrapper + switcher -------------------------------------------------
@@ -909,5 +1012,6 @@ fi
 printf '\n'
 ok "staging complete; nothing has been activated"
 ok "SLSsteam.so.64: $sls64_path"
+ok "netsock64.so: $netsock64_path"
 dim "verify:  $MOON_DIR/moon64 doctor"
 dim "switch:  $MOON_DIR/moon64 on     (undo: $MOON_DIR/moon64 off)"
