@@ -81,7 +81,7 @@ structural reason this cannot be ported back down to `ubuntu12_32`.
 Both failure paths are recoverable because nothing was written. There is no
 case where a guess is applied.
 
-The log is `~/.local/share/moon64/moon64-netsock.log`; it is appended to on every
+The log is `~/.cache/moon64/netsock.log`; it is appended to on every
 Steam start, so the newest block is the one that matters.
 
 ## Re-deriving the anchors for a new client build

@@ -283,7 +283,7 @@ finds nothing.
 
 It fails **closed**. Two anchors cover the two client layouts that ship today;
 zero matches (unknown future build) or two matches (ambiguous) both leave memory
-untouched and write a line to `~/.local/share/moon64/moon64-netsock.log`.
+untouched and write a line to `~/.cache/moon64/netsock.log`.
 Recovering a broken client from a blind patch is not possible; refusing to patch
 is always recoverable. See `patches/netsock64/README.md` for the anchors and how
 to re-derive them for a new client build.

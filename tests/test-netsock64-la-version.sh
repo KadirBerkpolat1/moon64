@@ -84,7 +84,6 @@ int main(int argc, char **argv) {
 }
 EOF
         if gcc -O2 -Wall -Wextra -o "$PROBE_BIN" "$PROBE_SRC" -ldl; then
-            mkdir -p "$TMP_ROOT/home/.local/share/moon64"
             probe_out="$(HOME="$TMP_ROOT/home" "$PROBE_BIN" "$SO" 2>&1)"
             probe_rc=$?
             if [ "$probe_rc" -eq 0 ]; then
@@ -105,11 +104,13 @@ EOF
         fi
         cp "$PROBE_BIN" "$TMP_ROOT/steam"
         cp "$PROBE_BIN" "$TMP_ROOT/notsteam"
-        mkdir -p "$TMP_ROOT/home-steam/.local/share/moon64" \
-                 "$TMP_ROOT/home-other/.local/share/moon64"
 
+        # A real $HOME exists; only .cache may be absent.  Provide the home
+        # dir but leave .cache missing so the shim's own mkdir of .cache (and
+        # .cache/moon64) is what creates the log path.
+        mkdir -p "$TMP_ROOT/home-steam"
         HOME="$TMP_ROOT/home-steam" LD_AUDIT="$SO" "$TMP_ROOT/steam" >/dev/null 2>&1
-        steam_log="$TMP_ROOT/home-steam/.local/share/moon64/moon64-netsock.log"
+        steam_log="$TMP_ROOT/home-steam/.cache/moon64/netsock.log"
         if [ -f "$steam_log" ] && grep -Fq 'audit loaded, la_version ' "$steam_log"; then
             pass "probe: steam-named host writes audit loaded log line"
         else
@@ -117,7 +118,7 @@ EOF
         fi
 
         HOME="$TMP_ROOT/home-other" LD_AUDIT="$SO" "$TMP_ROOT/notsteam" >/dev/null 2>&1
-        other_log="$TMP_ROOT/home-other/.local/share/moon64/moon64-netsock.log"
+        other_log="$TMP_ROOT/home-other/.cache/moon64/netsock.log"
         if [ ! -e "$other_log" ]; then
             pass "probe: non-steam host does not write audit loaded log"
         else
