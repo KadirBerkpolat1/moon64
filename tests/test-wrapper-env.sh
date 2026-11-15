@@ -136,7 +136,7 @@ dump1="$(cat "$DUMP_FILE")"
 assert_eq "case4 wrapper exits 0 when SLSsteam.so is valid" "0" "$rc4"
 assert_eq "case4 LD_AUDIT skips mismatched netsock64.so" "$SLS_DIR/SLSsteam.so" "$(val_of LD_AUDIT)"
 case "$err4" in
-    *"P2P cert patch skipped"*) pass "case4 stderr explains cert patch skipped"; PASS=$((PASS + 0)) ;;
+    *"P2P cert patch skipped"*) pass "case4 stderr explains cert patch skipped" ;;
     *) fail "case4 stderr explains cert patch skipped" "got: $err4" ;;
 esac
 

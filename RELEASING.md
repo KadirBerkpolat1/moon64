@@ -4,9 +4,11 @@
 `SLSsteam.so` and `netsock64.so` from a release of
 [slsteam-moon-64](https://github.com/KadirBerkpolat1/slsteam-moon-64) instead of
 compiling them. moon64 only consumes that release; it is built and published
-from slsteam-moon-64. The current release, `v1.0.0`, publishes `SLSsteam.so`,
-`SLSsteam.so.sha256` and `pattern-status.txt` (with `binary_sha256=` and no
-`netsock64_sha256=` line), but not `netsock64.so` or `netsock64.so.sha256`.
+from slsteam-moon-64. The current release publishes `SLSsteam.so`,
+`netsock64.so`, a `.sha256` for each and a `pattern-status.txt` with both
+`binary_sha256=` and `netsock64_sha256=`. `v1.1.0` is the first that does;
+`v1.0.0` published only `SLSsteam.so`, its `.sha256` and a `pattern-status.txt`
+with no `netsock64_sha256=` line.
 
 The default URL is `SLS64_PREBUILT_URL` in [`versions.env`](versions.env):
 

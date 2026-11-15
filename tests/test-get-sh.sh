@@ -393,7 +393,8 @@ assert_contains "h2: warns loudly" "the release has no netsock64.so and gcc is n
 assert_contains "h2: degraded, not failed" "this is a degraded feature, not a failed install" "$out"
 assert_contains "h2: summary" "netsock64.so: none (the P2P cert patch is inactive)" "$out"
 assert_contains "h2: get.sh reports success" "nothing is active yet" "$out"
-assert_contains "h2: close: cert patch inactive, and what gcc or a release would give" $'nothing is active yet.\nP2P cert patch: INACTIVE - co-op joins that need peer-to-peer (Satisfactory, REPO) will fail.\n                install gcc and run this again to build it, or wait for a release that ships netsock64.so.\n' "$out"
+assert_contains "h2: close: cert patch inactive, and that gcc would build it" $'nothing is active yet.\nP2P cert patch: INACTIVE - co-op joins that need peer-to-peer (Satisfactory, REPO) will fail.\n                install gcc and run this again to build it from the downloaded source.\n' "$out"
+assert_not_contains "h2: close: no SLSM_PREBUILT_URL advice when it is unset" "without SLSM_PREBUILT_URL" "$out"
 assert_not_contains "h2: close: never claims the patch is active" "P2P cert patch: active" "$out"
 assert_absent "h2: no netsock64.so" "$MD/netsock64.so"
 assert_same "h2: SLSsteam.so.64 is the release's" "$REL_ABSENT/SLSsteam.so" "$MD/SLSsteam.so.64"
@@ -402,6 +403,17 @@ distinct_cert_lines="$(printf '%s\n%s\n%s\n%s\n' \
     "$cert_line_inactive" "$cert_line_active" "$cert_line_changed" "$cert_line_nostate" \
     | sort -u | wc -l)"
 assert_eq "h2: all 4 cert-patch states emit distinct lines" "4" "$distinct_cert_lines"
+
+# A release without netsock64.so pinned through SLSM_PREBUILT_URL (v1.0.0's
+# shape), no gcc: the close names the way to the prebuilt cert patch.
+sb="$(make_sandbox h3)"
+MD="$sb/home/.local/share/moon64"
+GETSH_ENV=(SLSM_PREBUILT_URL="file://$REL_ABSENT/SLSsteam.so")
+out="$(pipe_get "$sb" 2>&1)"; rc=$?
+GETSH_ENV=()
+assert_rc "h3: pinned release without netsock64.so, no gcc: succeeds" 0 "$rc" "$out"
+assert_contains "h3: close: cert patch inactive, and how to get it without a compiler" $'nothing is active yet.\nP2P cert patch: INACTIVE - co-op joins that need peer-to-peer (Satisfactory, REPO) will fail.\n                install gcc and run this again, or run it without SLSM_PREBUILT_URL: the latest release ships netsock64.so prebuilt.\n' "$out"
+assert_absent "h3: no netsock64.so" "$MD/netsock64.so"
 
 # --- (i) through the pipe, a release whose pattern-status.txt names a
 # netsock64.so that is not there: a hard refusal, nothing staged ---------------

@@ -83,7 +83,11 @@ get_cert_patch() {
     local so="$1/netsock64.so" state="$1/netsock64.state" key val src="" sha="" got=""
     if [ ! -f "$so" ]; then
         printf 'P2P cert patch: INACTIVE - co-op joins that need peer-to-peer (Satisfactory, REPO) will fail.\n'
-        printf '                install gcc and run this again to build it, or wait for a release that ships netsock64.so.\n'
+        if [ -n "${SLSM_PREBUILT_URL:-}" ]; then
+            printf '                install gcc and run this again, or run it without SLSM_PREBUILT_URL: the latest release ships netsock64.so prebuilt.\n'
+        else
+            printf '                install gcc and run this again to build it from the downloaded source.\n'
+        fi
         return 0
     fi
     if [ -f "$state" ]; then

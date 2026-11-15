@@ -301,7 +301,9 @@ assert_absent "e3: on installed no wrapper" "$sb/home/.local/share/SLSsteam/path
 
 on_ovr="$(run "$sb" "$rel" env SLSM_ALLOW_UNVERIFIED_NETSOCK=1 bash "$sb/moon64/moon64" on 2>&1)"; rc=$?
 assert_rc "e4: SLSM_ALLOW_UNVERIFIED_NETSOCK=1 overrides on refusal" 0 "$rc" "$on_ovr"
-assert_contains "e4: override warns loudly" "SLSM_ALLOW_UNVERIFIED_NETSOCK=1: activating with unverified" "$on_ovr"
+assert_contains "e4: override warns loudly" "SLSM_ALLOW_UNVERIFIED_NETSOCK=1: activating although $sb/moon64/netsock64.so does not match $sb/moon64/netsock64.state" "$on_ovr"
+assert_contains "e4: override says the wrapper still skips it" "the wrapper still skips it at launch (P2P cert patch inactive) unless SLSM_ALLOW_UNVERIFIED_NETSOCK=1 is also in Steam's environment" "$on_ovr"
+assert_not_contains "e4: does not claim it activates the unverified file" "activating with unverified" "$on_ovr"
 
 wrap_out="$(run "$sb" "$rel" bash "$sb/home/.local/share/SLSsteam/path/steam" steam://open/main 2>&1)"; rc=$?
 assert_rc "e5: wrapper still starts Steam without the mismatched netsock64.so" 0 "$rc" "$wrap_out"
