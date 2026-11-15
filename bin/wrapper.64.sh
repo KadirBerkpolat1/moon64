@@ -10,8 +10,9 @@
 #   * no $SLSDIR/lib32 on LD_LIBRARY_PATH (that path only exists for the
 #     32-bit libcrypto workaround)
 # Kept: the audit-stack guard, CloudRedirect via LD_PRELOAD, Lumen sidecar
-# launch, desktop-coverage reconciliation, netsock64 cert patch, and intact
-# user Proton/Wine environment variables (WINEDLLOVERRIDES, PROTON_*).
+# launch, netsock64 cert patch, and intact user Proton/Wine environment
+# variables (WINEDLLOVERRIDES, PROTON_*). The desktop entry is not reconciled
+# here: `moon64 on`/`off` own it.
 set -uo pipefail
 
 SLSDIR="$HOME/.local/share/SLSsteam"
@@ -108,14 +109,6 @@ if [ -x "$LUMEN_DIR/lumen" ] && ! pgrep -f "$LUMEN_DIR/lumen" >/dev/null 2>&1; t
         LUMEN_BACKEND_DIR="$LUMEN_DIR/luatools/backend" \
         LUMEN_LUA_DIR="$LUMEN_DIR/lua" \
         setsid "$LUMEN_DIR/lumen" >/dev/null 2>&1 < /dev/null &
-fi
-
-# Desktop-entry reconciliation, off the launch critical path.
-if command -v systemctl >/dev/null 2>&1 && \
-   systemctl --user --quiet is-enabled slsteam-desktop-guardian.path >/dev/null 2>&1; then
-    systemctl --user start slsteam-desktop-guardian.service >/dev/null 2>&1 &
-elif [ -x "$SLSDIR/ensure-desktop-coverage.sh" ]; then
-    WRAPPER="$SLSDIR/path/steam" nice -n 10 "$SLSDIR/ensure-desktop-coverage.sh" --user >/dev/null 2>&1 &
 fi
 
 # Audit stack. Order matters: the cert patch first so it is installed before

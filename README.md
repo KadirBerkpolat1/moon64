@@ -175,16 +175,40 @@ to re-derive them for a new client build.
 - `netsock64.so` is built from source at install time; there is no prebuilt
   binary in the repo, so a stale artifact can never drift from the source.
 
+## Desktop entry
+
+Starting Steam from the menu, a dock or a `steam://` link goes through Steam's
+desktop entry, not through `SLSsteam/path/steam`. `moon64 on` therefore points
+every `Exec=` line of `steam.desktop` (and `steam-native.desktop`, when present)
+at the wrapper and keeps the arguments, so `Exec=/usr/bin/steam %U` becomes:
+
+```
+Exec=/home/you/.local/share/SLSsteam/path/steam %U
+```
+
+System files are never edited. If only `/usr/share/applications/steam.desktop`
+exists, `on` writes a user-level copy to `~/.local/share/applications/` and
+`off` deletes it again. If a user-level entry already exists (upstream
+SLSsteam's `setup.sh` creates one), `on` saves it once as
+`steam.desktop.moon64-bak`, edits it in place, and `off` puts the saved copy
+back byte for byte. Every other line stays as it was; an `LD_AUDIT=` in the
+entry that names only SLSsteam's own libraries is dropped, because the wrapper
+sets up that stack itself. An `Exec=` that is not a Steam launch (for example
+`flatpak run ...`) makes `on` refuse rather than guess; `moon64 doctor` reports
+this beforehand, and also reports when the 64-bit stack is active but the entry
+would still start stock Steam.
+
 ## Rollback
 
 ```sh
 ~/.local/share/moon64/moon64 off
 ```
 
-`off` restores `SLSsteam.so.32`, the CloudRedirect `.32` pair and the original
-wrapper, re-asserts the 32-bit client markers, and checks each restored file
-byte for byte against its saved copy. `install.sh` never overwrites an existing
-`.32` original, so repeated `on`/`off` cycles cannot degrade it.
+`off` restores `SLSsteam.so.32`, the CloudRedirect `.32` pair, the original
+wrapper and the Steam desktop entry, re-asserts the 32-bit client markers, and
+checks each restored file byte for byte against its saved copy. `install.sh`
+never overwrites an existing `.32` original, so repeated `on`/`off` cycles
+cannot degrade it.
 
 Rollback is only possible if a 32-bit SLSsteam was installed **before** moon64.
 `install.sh` and `moon64 on` save `SLSsteam.so.32` only when a 32-bit
