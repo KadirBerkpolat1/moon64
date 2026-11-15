@@ -26,6 +26,14 @@ AGPL-3.0 — see [`LICENSE`](LICENSE).
   (only with `--with-lumen-patch`). Each is cloned from the pin in
   [`versions.env`](versions.env) and keeps its own licence.
   `netsock64.so` is built from this repo's own source.
+- **Downloaded at install time, not redistributed here:** upstream
+  [AceSLS/SLSsteam](https://github.com/AceSLS/SLSsteam)'s 32-bit release
+  (AGPL-3.0), only when no 32-bit SLSsteam is installed, as the rollback
+  target. Pinned with its SHA-256 in [`versions.env`](versions.env).
+  With `--prebuilt`, also the 64-bit `SLSsteam.so` release asset of
+  [slsteam-moon-64](https://github.com/KadirBerkpolat1/slsteam-moon-64)
+  (AGPL-3.0-only) instead of building it — see
+  [Prebuilt `SLSsteam.so`](#prebuilt-slssteamso).
 
 ## Quickstart
 
@@ -33,10 +41,10 @@ On a clean machine, do these first:
 
 1. Install the **native** Steam client (not Flatpak) and start it once, so it
    downloads its 64-bit client into `steamrt64/`.
-2. Install upstream [SLSsteam](https://github.com/AceSLS/SLSsteam) (the 32-bit
-   release) by following its README, and check that Steam starts with it.
-   moon64 hooks into SLSsteam's launcher (`~/.local/share/SLSsteam/path/steam`),
-   and that 32-bit install is the only thing `moon64 off` can return to — see
+2. Optional: install upstream [SLSsteam](https://github.com/AceSLS/SLSsteam)
+   (the 32-bit release) first if you want `moon64 off` to return to a working
+   32-bit SLSsteam stack. Without it, `install.sh` fetches the upstream 32-bit
+   library as the rollback target and `off` returns to stock Steam — see
    [Rollback](#rollback).
 3. Optional: install [Lumen](https://github.com/swwayps/lumen) if you want
    `--with-lumen-patch`, and the 32-bit CloudRedirect if you want cloud saves.
@@ -64,17 +72,24 @@ Optional pieces are flags to the same installer:
 ./install.sh --with-cloudredirect --with-lumen-patch
 ```
 
+If prerequisites are missing, `install.sh` lists them with the package-manager
+command to install them; `./install.sh --install-deps` runs that command for
+you (see [Requirements](#requirements)). `./install.sh --prebuilt` downloads
+the 64-bit `SLSsteam.so` instead of building it, so it needs no C++ toolchain
+(see [Prebuilt `SLSsteam.so`](#prebuilt-slssteamso)).
+
 ## Requirements
 
 | Requirement | Needed for | Checked by |
 |---|---|---|
-| Linux x86_64 with **glibc >= 2.38** | building and loading the 64-bit `SLSsteam.so` (C++20 `__isoc23_strto*`) | `install.sh` refuses older glibc |
+| Linux x86_64 with **glibc >= 2.38** | building the 64-bit `SLSsteam.so` (C++20 `__isoc23_strto*`); a library built on this host then needs this host's glibc to load | `install.sh` refuses to build on older glibc; with `--prebuilt` it checks the downloaded library's glibc requirement against this host instead |
 | Native Steam in `~/.steam/steam`, `~/.local/share/Steam` or `~/.steam/debian-installation`, with `steamrt64/steam` and `steamrt64/steamclient.so` present | the 64-bit client | `moon64 doctor` |
-| Upstream 32-bit SLSsteam, already installed | the launcher hook and the rollback target | not checked — see [Rollback](#rollback) |
+| Upstream 32-bit SLSsteam | the rollback target | fetched by `install.sh` when absent; reported by `moon64 doctor` — see [Rollback](#rollback) |
+| `7z` (p7zip) or `bsdtar` (libarchive) | unpacking the upstream 32-bit release | `install.sh` (warning only: without it there is no rollback target; installed by `--install-deps`) |
 | Running as your desktop user, not root | file ownership under `~/.local/share` | `install.sh` |
-| `git`, `curl`, `file`, `readelf` (binutils), `ldd` | fetching sources, ELF checks | `install.sh` |
-| `gcc`, `g++` (C++20), `make` | building `netsock64.so` and `SLSsteam.so` | `install.sh` |
-| libcurl and OpenSSL development headers | building `SLSsteam.so` | `install.sh` |
+| `git`, `curl`, `file`, `readelf` (binutils), `ldd` | fetching sources, ELF checks | `install.sh` (installed by `--install-deps`; `git` only for a source build) |
+| `gcc`, `g++` (C++20), `make` | building `netsock64.so` (`gcc`) and `SLSsteam.so` (all three) | `install.sh` (installed by `--install-deps`; `--prebuilt` needs only `gcc` unless it falls back to a build) |
+| libcurl and OpenSSL development headers | building `SLSsteam.so` | `install.sh` (installed by `--install-deps`; not needed by `--prebuilt` unless it falls back to a build) |
 | 64-bit `libdbus-1.so.3` and a `libstdc++` with `GLIBCXX_3.4.32` (GCC 13+) | loading `SLSsteam.so` in the client | `install.sh`, `moon64 doctor` |
 | 64-bit `libcurl.so.4` | SLSsteam's network features (loaded at runtime) | `install.sh` (warning only) |
 | `cmake` | `--with-cloudredirect` only | `bin/build-cloudredirect.sh` |
@@ -87,26 +102,64 @@ Check the glibc floor:
 getconf GNU_LIBC_VERSION
 ```
 
-Arch Linux and derivatives:
+`install.sh` checks the command-line tools and headers above before it does
+anything else and prints everything that is missing as one list, with the
+exact `pacman`, `apt-get` or `dnf` command that installs it. It installs
+nothing by itself. To let it run that command, pass `--install-deps`:
 
 ```sh
-sudo pacman -S --needed base-devel git curl openssl file binutils dbus cmake
+./install.sh --install-deps
 ```
 
-On Debian/Ubuntu or Fedora, install your compiler toolchain, `git`, `curl`,
-`file` and binutils, plus the headers the installer asks for:
+With that flag it runs the package manager through `sudo -n`, which never
+prompts. If sudo needs a password, `install.sh` says so and stops; run the
+printed command yourself, then run `install.sh` again. The runtime libraries
+(`libdbus`, `libstdc++`, `libcurl.so.4`) and `cmake` are not covered by this
+and are still reported by the checks listed in the table.
+
+On Arch Linux and derivatives, this covers everything in the table in one go:
 
 ```sh
-sudo apt-get install -y libcurl4-openssl-dev libssl-dev
-```
-
-```sh
-sudo dnf install -y libcurl-devel openssl-devel
+sudo pacman -S --needed base-devel git curl openssl file binutils dbus cmake libarchive
 ```
 
 **Flatpak Steam is not supported.** moon64 only looks in the three native
 Steam roots listed above; a Flatpak install under
 `~/.var/app/com.valvesoftware.Steam` is never found.
+
+### Prebuilt `SLSsteam.so`
+
+```sh
+./install.sh --prebuilt
+```
+
+downloads the 64-bit `SLSsteam.so` from `SLSM_PREBUILT_URL`, or by default
+from the slsteam-moon-64 release asset named by `SLS64_PREBUILT_URL` in
+[`versions.env`](versions.env), and stages it without building anything. The
+release must publish `pattern-status.txt` next to the library, naming the
+library it was measured on, and `install.sh` checks the download as strictly
+as a build:
+
+- `<url>.sha256`, when published, must match; a mismatch stops the install.
+  Without one, `install.sh` warns and relies on the next check.
+- `pattern-status.txt` must contain exactly one `binary_sha256=` line equal to
+  the downloaded library's SHA-256, so a status file from another build cannot
+  vouch for it.
+- The file must be a 64-bit x86-64 ELF shared object.
+- `pattern-status.txt` must pass the same pattern gate as a source build.
+- Its libraries, symbol versions and glibc requirement must resolve on this
+  host.
+
+A failed check stops the install, with nothing staged. When the library or
+its `pattern-status.txt` cannot be downloaded (offline, or no release
+published yet), `install.sh` says so and builds from source instead, under
+the usual requirements and the glibc >= 2.38 floor. The final summary,
+`~/.local/share/moon64/slsteam64.state` and `moon64 doctor` all say which
+path produced `SLSsteam.so.64` and whether the active `SLSsteam.so` is it.
+
+slsteam-moon-64 has not published a release yet, so for now the default URL
+returns 404 and `--prebuilt` builds from source. [`RELEASING.md`](RELEASING.md)
+lists what a release must contain and how to build it.
 
 ## What is in here
 
@@ -117,7 +170,8 @@ Steam roots listed above; a Flatpak install under
 | `bin/wrapper.64.sh` | the 64-bit Steam launcher (what `SLSsteam/path/steam` becomes) |
 | `bin/moon64` | `on` / `off` / `status` / `doctor` switcher |
 | `install.sh` | stages every 64-bit piece; activates nothing |
-| `versions.env` | pinned sources: the slsteam-moon-64, Lumen and LuaTools forks and the CloudRedirect commit |
+| `RELEASING.md` | what a slsteam-moon-64 release must contain for `--prebuilt` |
+| `versions.env` | pinned sources: the slsteam-moon-64, Lumen and LuaTools forks, the CloudRedirect commit, the prebuilt `SLSsteam.so` URL and the 32-bit rollback release |
 
 ## Why a switcher instead of one wrapper
 
@@ -134,7 +188,7 @@ is already on disk before it is used, so recovery never depends on the network.
 
 | component | 32-bit client | 64-bit client |
 |---|---|---|
-| `SLSsteam.so` | upstream release | built from source at install time (slsteam-moon-64, pinned in `versions.env`) |
+| `SLSsteam.so` | upstream release | built from source at install time (slsteam-moon-64, pinned in `versions.env`), or its release asset with `--prebuilt` |
 | `netsock64.so` (P2P cert patch) | **impossible** — anchor absent | built here |
 | `library-inject.so` (libcurl redirect) | required | **dropped** — the 64-bit client brings its own libcurl |
 | `lib32/libcrypto.so.1.1` | SHA-1 workaround | **dropped** — 32-bit only, irrelevant |
@@ -175,25 +229,69 @@ to re-derive them for a new client build.
 - `netsock64.so` is built from source at install time; there is no prebuilt
   binary in the repo, so a stale artifact can never drift from the source.
 
+## Desktop entry
+
+Starting Steam from the menu, a dock or a `steam://` link goes through Steam's
+desktop entry, not through `SLSsteam/path/steam`. `moon64 on` therefore points
+every `Exec=` line of `steam.desktop` (and `steam-native.desktop`, when present)
+at the wrapper and keeps the arguments, so `Exec=/usr/bin/steam %U` becomes:
+
+```
+Exec=/home/you/.local/share/SLSsteam/path/steam %U
+```
+
+System files are never edited. If only `/usr/share/applications/steam.desktop`
+exists, `on` writes a user-level copy to `~/.local/share/applications/` and
+`off` deletes it again. If a user-level entry already exists (upstream
+SLSsteam's `setup.sh` creates one), `on` saves it once as
+`steam.desktop.moon64-bak`, edits it in place, and `off` puts the saved copy
+back byte for byte. Every other line stays as it was; an `LD_AUDIT=` in the
+entry that names only SLSsteam's own libraries is dropped, because the wrapper
+sets up that stack itself. An `Exec=` that is not a Steam launch (for example
+`flatpak run ...`) makes `on` refuse rather than guess; `moon64 doctor` reports
+this beforehand, and also reports when the 64-bit stack is active but the entry
+would still start stock Steam.
+
 ## Rollback
 
 ```sh
 ~/.local/share/moon64/moon64 off
 ```
 
-`off` restores `SLSsteam.so.32`, the CloudRedirect `.32` pair and the original
-wrapper, re-asserts the 32-bit client markers, and checks each restored file
-byte for byte against its saved copy. `install.sh` never overwrites an existing
-`.32` original, so repeated `on`/`off` cycles cannot degrade it.
+`off` restores `SLSsteam.so.32`, the CloudRedirect `.32` pair, the original
+wrapper and the Steam desktop entry, re-asserts the 32-bit client markers, and
+checks each restored file byte for byte against its saved copy. `install.sh`
+never overwrites an existing `.32` original, so repeated `on`/`off` cycles
+cannot degrade it.
 
-Rollback is only possible if a 32-bit SLSsteam was installed **before** moon64.
-`install.sh` and `moon64 on` save `SLSsteam.so.32` only when a 32-bit
-`SLSsteam.so` is already in `~/.local/share/SLSsteam`. On a machine that never
-had one there is nothing to go back to, and `off` refuses:
+Where the 32-bit `SLSsteam.so.32` comes from:
+
+- If a 32-bit `SLSsteam.so` is already in `~/.local/share/SLSsteam`,
+  `install.sh` (or `moon64 on`) saves that one.
+- Otherwise `install.sh` downloads upstream AceSLS SLSsteam release
+  `20261106120254`, the last one that ships a 32-bit library (pinned with its
+  SHA-256 in [`versions.env`](versions.env)). It checks the digest and that
+  `bin/SLSsteam.so` is a 32-bit i386 ELF, saves it as `SLSsteam.so.32`, and
+  records the URL, version and both digests in
+  `~/.local/share/moon64/rollback32.state`. A digest or ELF-class mismatch stops
+  the install. No network, or no `7z`/`bsdtar` to unpack it, only costs the
+  rollback target: the install continues with a warning.
+
+`moon64 doctor` shows which of the two you have. Without either, `off` refuses
+rather than leave a 64-bit library behind:
 
 ```
-fail  cannot restore 32-bit stack: /home/you/.local/share/SLSsteam/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit
+fail  cannot restore 32-bit stack: /home/you/.local/share/SLSsteam/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit (re-run install.sh with network access to fetch one)
 ```
 
-To get a rollback target, install upstream SLSsteam first (step 2 of the
-[Quickstart](#quickstart)), then run `install.sh` and `moon64 on`.
+`off` returns the launcher to what it was before `on`. On a machine that never
+had upstream SLSsteam, that is Steam's own desktop entry: `off` removes the
+override, removes the `SLSsteam/path/steam` wrapper `on` installed (only if it
+is still moon64's), and puts the Steam client switches
+(`.steam-enable/disable-steamrt64-client`) back as `on` found them instead of
+forcing the 32-bit client. The restored `SLSsteam.so` is left in place, but
+nothing loads it, so Steam starts without SLSsteam until you set up upstream's
+launcher. It and `SLSsteam.so.32` stay on purpose: the `.32` is the verified
+upstream download `install.sh` provisioned for `off` to restore, not a leftover,
+and `moon64 doctor` says so. `tests/test-install-e2e.sh` checks that the whole
+home directory then differs from the freshly installed state only by that file.

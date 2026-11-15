@@ -648,6 +648,7 @@ printf 'arch=x86_64\nrequired=38\nresolved=38\npending=0\nrunipcframe_tail=ready
 out="$(
     HOME="$sb/home" MOON64_DIR="$sb/moon64" SLS64_SRC="$sb/src" \
     SLSM_PROC_ROOT="$sb/proc" TMPDIR="$sb/tmp" \
+    SLSM_SLS32_URL="file://$sb/no-rollback-download.7z" \
     SLSM_STOP_STEAM_TIMEOUT=2 SLSM_STOP_STEAM_POLL=0.1 \
         bash "$REPO_ROOT/install.sh" 2>&1
 )"

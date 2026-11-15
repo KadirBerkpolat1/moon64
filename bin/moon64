@@ -4,8 +4,8 @@
 # Why a switcher rather than just a wrapper: the 32-bit stack — SLSsteam.so,
 # library-inject.so, cloud_redirect.so — is ELFCLASS32 and cannot be loaded into
 # a 64-bit client. Switching clients is therefore all-or-nothing, and this is
-# the single place that decides which side is active (including client markers
-# and ~/.config/environment.d/steam-32bit.conf).
+# the single place that decides which side is active (including client markers,
+# ~/.config/environment.d/steam-32bit.conf and the Steam desktop entry).
 #
 #   moon64 on      64-bit client + 64-bit SLSsteam + netsock64 (P2P cert patch)
 #   moon64 off     the previous 32-bit stack, byte-for-byte restored
@@ -26,6 +26,9 @@ ENV_D_DIR="${MOON64_ENV_D_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/environment.d}"
 LUMEN_FIX_INSTALLS_DIR="${LUMEN_FIX_INSTALLS_DIR:-$HOME/.local/share/Lumen/fix_installs}"
 STAGE_DIR="$MOON_DIR/staged"
 STEAM_ROOTS=("$HOME/.steam/steam" "$HOME/.local/share/Steam" "$HOME/.steam/debian-installation")
+SLS_WRAPPER="$SLS_DIR/path/steam"
+APPS_DIR="${MOON64_APPS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/applications}"
+STEAM_DESKTOP_NAMES=(steam.desktop steam-native.desktop)
 
 c_red=$'\033[38;5;203m'; c_grn=$'\033[38;5;114m'; c_yel=$'\033[38;5;221m'
 c_dim=$'\033[2m'; c_nc=$'\033[0m'
@@ -573,9 +576,256 @@ disable_64bit_client() {
     done
 }
 
+# record_client_markers <file> / restore_client_markers <file> — keep which
+# client switches each Steam root had, so `off` can put a machine that had no
+# SLSsteam launcher back exactly as `on` found it.
+record_client_markers() {
+    local r en dis
+    for r in "${STEAM_ROOTS[@]}"; do
+        [ -d "$r" ] || continue
+        en=0; dis=0
+        [ -e "$r/.steam-enable-steamrt64-client" ] && en=1
+        [ -e "$r/.steam-disable-steamrt64-client" ] && dis=1
+        printf '%s\t%s\t%s\n' "$r" "$en" "$dis"
+    done > "$1.tmp" && mv -f "$1.tmp" "$1"
+}
+
+restore_client_markers() {
+    local r en dis
+    while IFS=$'\t' read -r r en dis; do
+        [ -d "$r" ] || continue
+        if [ "$en" = 1 ]; then
+            : > "$r/.steam-enable-steamrt64-client" || return 1
+        else
+            rm -f "$r/.steam-enable-steamrt64-client" || return 1
+        fi
+        if [ "$dis" = 1 ]; then
+            : > "$r/.steam-disable-steamrt64-client" || return 1
+        else
+            rm -f "$r/.steam-disable-steamrt64-client" || return 1
+        fi
+    done < "$1"
+}
+
+# --- Steam desktop entry ---------------------------------------------------
+# A normal Steam launch goes through the desktop entry, so `on` points every
+# Exec= of the Steam entries at the SLSsteam wrapper and `off` puts them back.
+# System files are never edited: when only a system entry exists, `on` writes a
+# user-level override in $APPS_DIR and leaves <file>.moon64-created; an existing
+# user-level entry is edited in place after a one-time <file>.moon64-bak copy.
+
+# system_desktop_file <name> — first <dir>/applications/<name> in $XDG_DATA_DIRS.
+system_desktop_file() {
+    local name="$1" d
+    local -a dirs=()
+    IFS=: read -r -a dirs <<< "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+    for d in "${dirs[@]}"; do
+        [ -n "$d" ] && [ "$d/applications" != "$APPS_DIR" ] || continue
+        if [ -f "$d/applications/$name" ]; then
+            printf '%s' "$d/applications/$name"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# exec_next_token <str> — split one raw Exec= token (double quotes and
+# backslash escapes respected) into EXEC_TOK; the remainder goes to EXEC_REST.
+EXEC_TOK=""; EXEC_REST=""; EXEC_ENV=""; EXEC_PROG=""; EXEC_ARGS=""
+exec_next_token() {
+    local s="$1" i=0 n c q=0 esc=0
+    s="${s#"${s%%[![:space:]]*}"}"
+    n=${#s}
+    while [ "$i" -lt "$n" ]; do
+        c="${s:i:1}"
+        if [ "$esc" = 1 ]; then
+            esc=0
+        elif [ "$c" = "\\" ]; then
+            esc=1
+        elif [ "$c" = '"' ]; then
+            q=$((1 - q))
+        elif [ "$q" = 0 ]; then
+            case "$c" in [[:space:]]) break ;; esac
+        fi
+        i=$((i + 1))
+    done
+    [ "$q" = 0 ] || return 1
+    EXEC_TOK="${s:0:i}"
+    EXEC_REST="${s:i}"
+    EXEC_REST="${EXEC_REST#"${EXEC_REST%%[![:space:]]*}"}"
+}
+
+# own_auditors_only <LD_AUDIT value> — true when it names only our auditors.
+own_auditors_only() {
+    local v="$1" a
+    local -a parts=()
+    v="${v#\"}"; v="${v%\"}"
+    IFS=: read -r -a parts <<< "$v"
+    for a in "${parts[@]}"; do
+        case "$a" in
+            ''|*/SLSsteam.so|*/library-inject.so|*/netsock64.so) ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+# exec_split <Exec value> — parse "[env NAME=VAL...] PROGRAM [ARGS]" into
+# EXEC_ENV (kept assignments, raw), EXEC_PROG (unquoted) and EXEC_ARGS (raw).
+# An LD_AUDIT naming only our own auditors is dropped: the wrapper builds that
+# stack itself. env options, unbalanced quotes or escapes in the program
+# return 1, so callers refuse instead of guessing.
+exec_split() {
+    local name
+    EXEC_ENV=""; EXEC_PROG=""; EXEC_ARGS=""
+    exec_next_token "$1" || return 1
+    if [ "$EXEC_TOK" = env ]; then
+        while :; do
+            exec_next_token "$EXEC_REST" || return 1
+            case "$EXEC_TOK" in [A-Za-z_]*=*) ;; *) break ;; esac
+            name="${EXEC_TOK%%=*}"
+            case "$name" in *[!A-Za-z0-9_]*) return 1 ;; esac
+            if [ "$name" != LD_AUDIT ] || ! own_auditors_only "${EXEC_TOK#*=}"; then
+                EXEC_ENV="${EXEC_ENV:+$EXEC_ENV }$EXEC_TOK"
+            fi
+        done
+    fi
+    EXEC_PROG="$EXEC_TOK"
+    case "$EXEC_PROG" in \"*\") EXEC_PROG="${EXEC_PROG:1:${#EXEC_PROG}-2}" ;; esac
+    case "$EXEC_PROG" in ''|*[\\\"\`\$]*) return 1 ;; esac
+    EXEC_ARGS="$EXEC_REST"
+}
+
+is_steam_program() {
+    case "${1##*/}" in
+        steam|steam-native|steam-runtime|steam.sh) return 0 ;;
+    esac
+    return 1
+}
+
+# desktop_exec_arg <path> — the path as one Exec= argument (quoted if needed).
+desktop_exec_arg() {
+    local s="$1"
+    case "$s" in *[\\\"\`\$]*|*$'\n'*) return 1 ;; esac
+    case "$s" in *[[:space:]\'\>\<~\|\&\;\*\?\#\(\)]*) s="\"$s\"" ;; esac
+    printf '%s' "${s//%/%%}"
+}
+
+# desktop_rewrite_file <src> <dst> — write src to dst with every Exec= running
+# the wrapper; every other byte is copied unchanged. Returns 1 when an Exec= is
+# not a recognisable Steam launch or there is no [Desktop Entry] Exec=.
+desktop_rewrite_file() {
+    local src="$1" dst="$2" line key cr section="" main=0 first=1 nl_end=1 exec_arg
+    exec_arg="$(desktop_exec_arg "$SLS_WRAPPER")" || return 1
+    [ -n "$(tail -c1 "$src" 2>/dev/null)" ] && nl_end=0
+    {
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ "$first" = 1 ] || printf '\n'
+            first=0
+            cr=""
+            case "$line" in *$'\r') cr=$'\r'; line="${line%$'\r'}" ;; esac
+            case "$line" in '['*) section="$line" ;; esac
+            if [[ "$line" =~ ^(Exec[[:space:]]*=[[:space:]]*)(.*)$ ]]; then
+                key="${BASH_REMATCH[1]}"
+                exec_split "${BASH_REMATCH[2]}" || return 1
+                is_steam_program "$EXEC_PROG" || return 1
+                [ "$section" = "[Desktop Entry]" ] && main=1
+                line="$key${EXEC_ENV:+env $EXEC_ENV }$exec_arg${EXEC_ARGS:+ $EXEC_ARGS}"
+            fi
+            printf '%s%s' "$line" "$cr"
+        done < "$src"
+        [ "$first" = 1 ] || [ "$nl_end" = 0 ] || printf '\n'
+    } > "$dst" || return 1
+    [ "$main" = 1 ] || return 1
+    chmod --reference="$src" "$dst" 2>/dev/null || true
+}
+
+# desktop_entry_state <file> — "ours" when every Exec= runs the wrapper,
+# "partial" when only some do, "foreign <program>" when the main Exec= runs
+# something else, "invalid" when `on` would refuse to rewrite the file.
+desktop_entry_state() {
+    local line section="" main_prog="" seen_main=0 all_ours=1
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        case "$line" in '['*) section="$line" ;; esac
+        [[ "$line" =~ ^Exec[[:space:]]*=[[:space:]]*(.*)$ ]] || continue
+        if ! exec_split "${BASH_REMATCH[1]}" || ! is_steam_program "$EXEC_PROG"; then
+            printf 'invalid'
+            return 0
+        fi
+        [ "$EXEC_PROG" = "$SLS_WRAPPER" ] || all_ours=0
+        if [ "$section" = "[Desktop Entry]" ] && [ "$seen_main" = 0 ]; then
+            seen_main=1
+            main_prog="$EXEC_PROG"
+        fi
+    done < "$1"
+    if [ "$seen_main" = 0 ]; then
+        printf 'invalid'
+    elif [ "$all_ours" = 1 ]; then
+        printf 'ours'
+    elif [ "$main_prog" = "$SLS_WRAPPER" ]; then
+        printf 'partial'
+    else
+        printf 'foreign %s' "$main_prog"
+    fi
+}
+
+# desktop_targets — "<user-level path>\t<source>" per Steam entry: the user
+# file when it exists, otherwise the system file it would be overridden from.
+desktop_targets() {
+    local name sys
+    for name in "${STEAM_DESKTOP_NAMES[@]}"; do
+        if [ -f "$APPS_DIR/$name" ]; then
+            printf '%s\t%s\n' "$APPS_DIR/$name" "$APPS_DIR/$name"
+        elif sys="$(system_desktop_file "$name")"; then
+            printf '%s\t%s\n' "$APPS_DIR/$name" "$sys"
+        fi
+    done
+}
+
+# $DESKTOP_STATE holds "<sha256>\t<path>" for every desktop entry `on` wrote.
+# `off` restores or removes an entry only while it still has those bytes. The
+# bytes cannot be recomputed at `off` time: an override is rewritten from the
+# system entry, which changes with every Steam package update.
+DESKTOP_STATE="$MOON_DIR/desktop.state"
+
+desktop_sum() {
+    local s
+    s="$(sha256sum < "$1" 2>/dev/null)" || return 1
+    printf '%s' "${s%% *}"
+}
+
+# desktop_record <path> [sha256] - remember <path>'s bytes, or forget it.
+desktop_record() {
+    local s p tmp="$DESKTOP_STATE.tmp"
+    {
+        if [ -f "$DESKTOP_STATE" ]; then
+            while IFS=$'\t' read -r s p; do
+                [ -z "$p" ] || [ "$p" = "$1" ] || printf '%s\t%s\n' "$s" "$p"
+            done < "$DESKTOP_STATE"
+        fi
+        [ -z "${2:-}" ] || printf '%s\t%s\n' "$2" "$1"
+    } > "$tmp" || return 1
+    if [ -s "$tmp" ]; then
+        mv -f "$tmp" "$DESKTOP_STATE"
+    else
+        rm -f "$tmp" "$DESKTOP_STATE"
+    fi
+}
+
+# desktop_is_ours <path> - true while <path> holds exactly the bytes `on` wrote.
+desktop_is_ours() {
+    local s p got
+    [ -f "$DESKTOP_STATE" ] && got="$(desktop_sum "$1")" || return 1
+    while IFS=$'\t' read -r s p; do
+        [ "$p" = "$1" ] && [ "$s" = "$got" ] && return 0
+    done < "$DESKTOP_STATE"
+    return 1
+}
+
 # --- two-phase transaction rollback ----------------------------------------
 TX_ACTIVE=0
 TX_RB_DIR=""
+DESKTOP_TX_PATHS=()
 
 snapshot_file() {
     local live="$1" key="$2"
@@ -632,6 +882,10 @@ tx_rollback() {
     restore_snapshot_file "cr_cli" "$CR_DIR/cloud_redirect_cli"
     restore_snapshot_file "wrapper" "$SLS_DIR/path/steam"
     restore_snapshot_file "env_conf" "$ENV_CONF"
+    local k
+    for k in "${!DESKTOP_TX_PATHS[@]}"; do
+        restore_snapshot_file "desktop.$k" "${DESKTOP_TX_PATHS[k]}"
+    done
     restore_roots
     sync_systemd_env "$(env_conf_value)"
 }
@@ -691,9 +945,11 @@ save_original_lib() {
 cmd_on() {
     local wrapper="$SLS_DIR/path/steam"
     local wrapper_bak="$MOON_DIR/wrapper.32.bak"
+    local wrapper_absent="$MOON_DIR/wrapper.absent" markers_pre="$MOON_DIR/client-markers.pre-on"
     local env_saved="$MOON_DIR/steam-32bit.conf.32"
     local env_absent="$MOON_DIR/steam-32bit.conf.absent"
-    local stage_cr=0 stage_cr_cli=0
+    local stage_cr=0 stage_cr_cli=0 dt_dst dt_src dt_sum k dt_ours=0
+    local -a dt_user=()
 
     cmd_stop_steam || exit 1
     require_file_cmd
@@ -731,6 +987,20 @@ cmd_on() {
 STEAM_FORCE_CLIENT=steamrt64
 CONF
 
+    # Desktop entries: stage the rewritten copy of each one that does not yet
+    # start the wrapper. Refuse the whole switch rather than guess at an Exec=.
+    while IFS=$'\t' read -r dt_dst dt_src; do
+        [ -n "$dt_dst" ] || continue
+        desktop_rewrite_file "$dt_src" "$STAGE_DIR/desktop.new" \
+            || die "cannot point $dt_src at $SLS_WRAPPER: an Exec= line is not a recognisable Steam launch (refusing to guess)"
+        if [ -f "$dt_dst" ] && cmp -s "$dt_dst" "$STAGE_DIR/desktop.new"; then
+            rm -f "$STAGE_DIR/desktop.new"
+            continue
+        fi
+        mv -f "$STAGE_DIR/desktop.new" "$STAGE_DIR/desktop.${#dt_user[@]}" || die "cannot stage $dt_dst"
+        dt_user+=("$dt_dst")
+    done < <(desktop_targets)
+
     # Save 32-bit originals onto disk BEFORE Phase 2 mutates any active file.
     mkdir -p "$MOON_DIR" "$SLS_DIR" "$(dirname "$wrapper")" || die "cannot create target directories"
     save_original_lib "$SLS_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so.32"
@@ -740,6 +1010,9 @@ CONF
     fi
     if [ -f "$wrapper" ] && [ ! -f "$wrapper_bak" ] && ! cmp -s "$wrapper" "$MOON_DIR/wrapper.64.sh"; then
         atomic_copy_preserve "$wrapper" "$wrapper_bak" || die "cannot back up $wrapper"
+    elif [ ! -e "$wrapper" ] && [ ! -f "$wrapper_bak" ] && [ ! -f "$wrapper_absent" ]; then
+        record_client_markers "$markers_pre" || die "cannot record the Steam client switches"
+        : > "$wrapper_absent" || die "cannot mark $wrapper absent"
     fi
     if [ -f "$ENV_CONF" ]; then
         if [ ! -f "$env_saved" ] && [ ! -f "$env_absent" ] && [ "$(env_conf_value)" != "steamrt64" ]; then
@@ -748,6 +1021,16 @@ CONF
     elif [ ! -f "$env_saved" ] && [ ! -f "$env_absent" ]; then
         : > "$env_absent" || die "cannot mark $ENV_CONF absent"
     fi
+    for dt_dst in "${dt_user[@]}"; do
+        if [ -e "$dt_dst.moon64-bak" ] || [ -e "$dt_dst.moon64-created" ]; then
+            continue
+        elif [ -f "$dt_dst" ]; then
+            atomic_copy_preserve "$dt_dst" "$dt_dst.moon64-bak" || die "cannot back up $dt_dst"
+        else
+            mkdir -p "$APPS_DIR" || die "cannot create $APPS_DIR"
+            : > "$dt_dst.moon64-created" || die "cannot record $dt_dst as a moon64 override"
+        fi
+    done
 
     # Snapshot exact pre-commit live state for rollback if Phase 2 fails/aborts.
     snapshot_file "$SLS_DIR/SLSsteam.so" "sls"
@@ -755,6 +1038,10 @@ CONF
     snapshot_file "$CR_DIR/cloud_redirect_cli" "cr_cli"
     snapshot_file "$wrapper" "wrapper"
     snapshot_file "$ENV_CONF" "env_conf"
+    DESKTOP_TX_PATHS=("${dt_user[@]}")
+    for k in "${!dt_user[@]}"; do
+        snapshot_file "${dt_user[k]}" "desktop.$k"
+    done
     snapshot_roots
 
     # --- Phase 2: atomic commit --------------------------------------------
@@ -771,6 +1058,11 @@ CONF
     atomic_install 644 "$STAGE_DIR/steam-32bit.conf" "$ENV_CONF" || die "cannot update $ENV_CONF"
     enable_64bit_client || die "cannot write steamrt64 client markers"
     sync_systemd_env "steamrt64"
+    for k in "${!dt_user[@]}"; do
+        atomic_copy_preserve "$STAGE_DIR/desktop.$k" "${dt_user[k]}" || die "cannot update ${dt_user[k]}"
+        dt_sum="$(desktop_sum "${dt_user[k]}")" || die "cannot hash ${dt_user[k]}"
+        desktop_record "${dt_user[k]}" "$dt_sum" || die "cannot record ${dt_user[k]} in $DESKTOP_STATE"
+    done
 
     # Post-commit ELF verification
     [ "$(elfbits "$SLS_DIR/SLSsteam.so")" = 64 ] || die "post-commit check: SLSsteam.so is not 64-bit"
@@ -780,6 +1072,9 @@ CONF
             [ "$(elfbits "$CR_DIR/cloud_redirect_cli")" = 64 ] || die "post-commit check: cloud_redirect_cli is not 64-bit"
         fi
     fi
+    for k in "${!dt_user[@]}"; do
+        [ "$(desktop_entry_state "${dt_user[k]}")" = ours ] || die "post-commit check: ${dt_user[k]} does not start $SLS_WRAPPER"
+    done
 
     tx_commit_done
 
@@ -792,6 +1087,16 @@ CONF
     fi
     ok "wrapper: $wrapper (64-bit)"
     ok "environment.d: $ENV_CONF (STEAM_FORCE_CLIENT=steamrt64)"
+    for dt_dst in "${STEAM_DESKTOP_NAMES[@]}"; do
+        dt_dst="$APPS_DIR/$dt_dst"
+        if [ -f "$dt_dst" ] && [ "$(desktop_entry_state "$dt_dst")" = ours ]; then
+            ok "desktop entry: $dt_dst starts $SLS_WRAPPER"
+            dt_ours=1
+        fi
+    done
+    if [ "$dt_ours" = 0 ]; then
+        warn "no Steam desktop entry found in $APPS_DIR or \$XDG_DATA_DIRS; a launcher will not run the 64-bit stack"
+    fi
     if [ ! -f "$MOON_DIR/netsock64.so" ]; then
         warn "netsock64.so missing — the P2P cert patch will not be applied"
     fi
@@ -799,16 +1104,23 @@ CONF
         warn "this shell still exports STEAM_FORCE_CLIENT=ubuntu12_32; unset it before launching steam.sh directly"
     fi
     printf '\n'
-    ok "64-bit stack active — start Steam from your normal launcher"
+    if [ "$dt_ours" = 1 ]; then
+        ok "64-bit stack active — start Steam from your normal launcher"
+    else
+        ok "64-bit stack active — start Steam with $SLS_WRAPPER"
+    fi
 }
 
 cmd_off() {
     local wrapper="$SLS_DIR/path/steam"
     local wrapper_bak="$MOON_DIR/wrapper.32.bak"
+    local wrapper_absent="$MOON_DIR/wrapper.absent" markers_pre="$MOON_DIR/client-markers.pre-on"
+    local wrap_action="keep"
     local env_saved="$MOON_DIR/steam-32bit.conf.32"
     local env_absent="$MOON_DIR/steam-32bit.conf.absent"
     local stage_sls=0 stage_cr=0 stage_cr_cli=0 stage_wrap=0
-    local env_action="keep"
+    local env_action="keep" dt k
+    local -a dr_user=() dr_mode=()
 
     cmd_stop_steam || exit 1
     require_file_cmd
@@ -824,7 +1136,7 @@ cmd_off() {
         cmp -s "$STAGE_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so.32" || die "staged SLSsteam.so byte mismatch"
         stage_sls=1
     elif [ "$(elfbits "$SLS_DIR/SLSsteam.so")" = 64 ]; then
-        die "cannot restore 32-bit stack: $SLS_DIR/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit"
+        die "cannot restore 32-bit stack: $SLS_DIR/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit (re-run install.sh with network access to fetch one)"
     fi
 
     if [ -f "$CR_DIR/cloud_redirect.so.32" ]; then
@@ -846,6 +1158,16 @@ cmd_off() {
         cp -a "$wrapper_bak" "$STAGE_DIR/wrapper" || die "cannot stage 32-bit wrapper"
         cmp -s "$STAGE_DIR/wrapper" "$wrapper_bak" || die "staged wrapper byte mismatch"
         stage_wrap=1
+    elif [ -f "$wrapper_absent" ]; then
+        # There was no launcher before `on`. Remove only the wrapper `on`
+        # installed; anything put there since is someone else's.
+        if [ ! -e "$wrapper" ]; then
+            wrap_action=gone
+        elif cmp -s "$wrapper" "$MOON_DIR/wrapper.64.sh"; then
+            wrap_action=remove
+        else
+            wrap_action=foreign
+        fi
     fi
 
     if [ -f "$env_saved" ]; then
@@ -862,12 +1184,42 @@ CONF
         env_action="fallback"
     fi
 
+    # Desktop entries: back to the saved original, or drop the override `on`
+    # created, but only while the entry still holds the bytes `on` wrote; one
+    # changed since then is the user's and is kept. An entry that already
+    # started the wrapper before `on` has no marker and is left.
+    for dt in "${STEAM_DESKTOP_NAMES[@]}"; do
+        dt="$APPS_DIR/$dt"
+        k="${#dr_user[@]}"
+        if [ -f "$dt.moon64-bak" ]; then
+            if [ -e "$dt" ] && ! desktop_is_ours "$dt" && ! cmp -s "$dt" "$dt.moon64-bak"; then
+                dr_user+=("$dt"); dr_mode+=(keep)
+                continue
+            fi
+            cp -a "$dt.moon64-bak" "$STAGE_DIR/desktop.$k" || die "cannot stage $dt.moon64-bak"
+            cmp -s "$STAGE_DIR/desktop.$k" "$dt.moon64-bak" || die "staged $dt byte mismatch"
+            dr_user+=("$dt"); dr_mode+=(restore)
+        elif [ -e "$dt.moon64-created" ]; then
+            if [ ! -e "$dt" ]; then
+                dr_user+=("$dt"); dr_mode+=(gone)
+            elif desktop_is_ours "$dt"; then
+                dr_user+=("$dt"); dr_mode+=(remove)
+            else
+                dr_user+=("$dt"); dr_mode+=(keep)
+            fi
+        fi
+    done
+
     # Snapshot current live state for rollback if Phase 2 fails/aborts.
     snapshot_file "$SLS_DIR/SLSsteam.so" "sls"
     snapshot_file "$CR_DIR/cloud_redirect.so" "cr_so"
     snapshot_file "$CR_DIR/cloud_redirect_cli" "cr_cli"
     snapshot_file "$wrapper" "wrapper"
     snapshot_file "$ENV_CONF" "env_conf"
+    DESKTOP_TX_PATHS=("${dr_user[@]}")
+    for k in "${!dr_user[@]}"; do
+        snapshot_file "${dr_user[k]}" "desktop.$k"
+    done
     snapshot_roots
 
     # --- Phase 2: atomic commit + byte-exact verification ------------------
@@ -891,6 +1243,8 @@ CONF
     if [ "$stage_wrap" = 1 ]; then
         atomic_copy_preserve "$STAGE_DIR/wrapper" "$wrapper" || die "cannot restore wrapper"
         cmp -s "$wrapper" "$wrapper_bak" || die "wrapper byte-exact check failed"
+    elif [ "$wrap_action" = remove ]; then
+        rm -f "$wrapper" || die "cannot remove $wrapper"
     fi
     case "$env_action" in
         restore)
@@ -907,9 +1261,31 @@ CONF
             sync_systemd_env "ubuntu12_32"
             ;;
     esac
+    for k in "${!dr_user[@]}"; do
+        case "${dr_mode[k]}" in
+            restore)
+                atomic_copy_preserve "$STAGE_DIR/desktop.$k" "${dr_user[k]}" || die "cannot restore ${dr_user[k]}"
+                cmp -s "${dr_user[k]}" "${dr_user[k]}.moon64-bak" || die "${dr_user[k]} byte-exact check failed"
+                ;;
+            remove)
+                rm -f "${dr_user[k]}" || die "cannot remove ${dr_user[k]}"
+                ;;
+        esac
+    done
 
-    disable_64bit_client || die "cannot restore 32-bit client markers"
+    if [ "$wrap_action" = remove ] || [ "$wrap_action" = gone ]; then
+        if [ -f "$markers_pre" ]; then
+            restore_client_markers "$markers_pre" || die "cannot restore the Steam client switches"
+        fi
+    else
+        disable_64bit_client || die "cannot restore 32-bit client markers"
+    fi
     tx_commit_done
+    for k in "${!dr_user[@]}"; do
+        rm -f "${dr_user[k]}.moon64-bak" "${dr_user[k]}.moon64-created"
+        desktop_record "${dr_user[k]}" || warn "cannot drop ${dr_user[k]} from $DESKTOP_STATE"
+    done
+    [ "$wrap_action" = remove ] && rmdir "${wrapper%/*}" 2>/dev/null
 
     if [ "$stage_sls" = 1 ]; then
         ok "SLSsteam.so: 32-bit restored (byte-exact)"
@@ -921,18 +1297,39 @@ CONF
     elif [ "$(elfbits "$CR_DIR/cloud_redirect.so")" = 64 ]; then
         warn "cloud_redirect.so is 64-bit with no .32 backup; rebuild/reinstall 32-bit CloudRedirect"
     fi
-    if [ "$stage_wrap" = 1 ]; then
-        ok "wrapper: $wrapper (restored byte-exact to 32-bit stack)"
-    else
-        warn "no saved 32-bit wrapper at $wrapper_bak; launcher left as is"
-    fi
+    case "$stage_wrap:$wrap_action" in
+        1:*)        ok "wrapper: $wrapper (restored byte-exact to 32-bit stack)" ;;
+        0:remove)   ok "wrapper: removed $wrapper (there was none before 'moon64 on')" ;;
+        0:gone)     ;;
+        0:foreign)  warn "$wrapper was replaced after 'moon64 on'; left as is" ;;
+        *)          warn "no saved 32-bit wrapper at $wrapper_bak; launcher left as is" ;;
+    esac
     case "$env_action" in
         restore)  ok "environment.d: $ENV_CONF restored (byte-exact)" ;;
         remove)   ok "environment.d: $ENV_CONF removed (was absent before 'moon64 on')" ;;
         fallback) ok "environment.d: $ENV_CONF reset to STEAM_FORCE_CLIENT=ubuntu12_32" ;;
     esac
+    for k in "${!dr_user[@]}"; do
+        case "${dr_mode[k]}" in
+            restore)
+                ok "desktop entry: ${dr_user[k]} restored (byte-exact)"
+                ;;
+            remove)
+                ok "desktop entry: removed the moon64 override ${dr_user[k]}"
+                system_desktop_file "${dr_user[k]##*/}" >/dev/null \
+                    || warn "Steam's own ${dr_user[k]##*/} is gone as well; no Steam desktop entry remains"
+                ;;
+            keep)
+                warn "desktop entry: ${dr_user[k]} was changed after 'moon64 on'; kept your version"
+                ;;
+        esac
+    done
     printf '\n'
-    ok "32-bit stack active — start Steam from your normal launcher"
+    if [ "$wrap_action" = remove ] || [ "$wrap_action" = gone ]; then
+        ok "moon64 is off — Steam starts as it did before 'moon64 on', without SLSsteam"
+    else
+        ok "32-bit stack active — start Steam from your normal launcher"
+    fi
 }
 
 cmd_status() {
@@ -1138,6 +1535,132 @@ check_proton_state() {
         dim "managed games: none recorded ($fix_dir)"
     fi
 }
+
+# report_sls64_origin <active SLSsteam bits> — say whether the staged
+# SLSsteam.so.64 was downloaded prebuilt or built from source, and whether the
+# active SLSsteam.so is that binary.
+report_sls64_origin() {
+    local active="$1" f="$MOON_DIR/SLSsteam.so.64" state="$MOON_DIR/slsteam64.state" src want got origin
+    [ -f "$f" ] || return 0
+    if [ -f "$state" ]; then
+        src="$(sed -n 's/^source=//p' "$state" | tail -n1)"
+        want="$(sed -n 's/^sha256=//p' "$state" | tail -n1)"
+        case "$src" in
+            prebuilt)
+                origin="prebuilt, downloaded from $(sed -n 's/^url=//p' "$state" | tail -n1)"
+                [ "$(sed -n 's/^sha256_published=//p' "$state" | tail -n1)" = yes ] \
+                    || origin="$origin (no .sha256 published; checked against pattern-status.txt only)"
+                ;;
+            built)
+                origin="built from source at $(sed -n 's/^src=//p' "$state" | tail -n1) @ $(sed -n 's/^commit=//p' "$state" | tail -n1)"
+                ;;
+            *)
+                origin="of unknown origin ($state says source=${src:-nothing})"
+                ;;
+        esac
+        got="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+        [ -z "$want" ] || [ "$got" = "$want" ] \
+            || warn "$f changed since install.sh recorded it in $state"
+    else
+        origin="of unrecorded origin (staged before install.sh kept $state)"
+    fi
+    dim "staged SLSsteam.so.64: $origin"
+    if [ "$active" = 64 ]; then
+        if cmp -s "$SLS_DIR/SLSsteam.so" "$f"; then
+            ok "active SLSsteam.so is the staged binary ($origin)"
+        else
+            warn "active 64-bit SLSsteam.so differs from the staged $f — run 'moon64 on' to activate it"
+        fi
+    fi
+    return 0
+}
+
+# check_rollback_target <active SLSsteam bits> — report what `off` would restore
+# and where it came from. Returns 1 when the saved .32 is not 32-bit.
+check_rollback_target() {
+    local active="$1" f="$SLS_DIR/SLSsteam.so.32" state="$MOON_DIR/rollback32.state" ver want got
+    printf '%s\n' "-- rollback target --"
+    if [ ! -f "$f" ]; then
+        if [ "$active" = 32 ]; then
+            dim "no $f yet; 'moon64 on' saves the active 32-bit SLSsteam.so there"
+        else
+            warn "no $f: 'moon64 off' cannot restore a 32-bit stack — re-run install.sh with network access"
+        fi
+        return 0
+    fi
+    if [ "$(elfbits "$f")" != 32 ]; then
+        bad "$f is not 32-bit; 'moon64 off' would refuse it"
+        return 1
+    fi
+    if [ ! -f "$state" ]; then
+        ok "$f: saved from the 32-bit SLSsteam installed before moon64"
+        return 0
+    fi
+    ver="$(sed -n 's/^version=//p' "$state" | tail -n1)"
+    want="$(sed -n 's/^sha256=//p' "$state" | tail -n1)"
+    got="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+    if [ -n "$want" ] && [ "$got" = "$want" ]; then
+        ok "$f: upstream SLSsteam $ver, fetched by install.sh (sha256 $got)"
+        dim "  intentional: install.sh provisioned it so 'moon64 off' always has a 32-bit stack to restore; keep it"
+        if [ "$active" = 32 ] && cmp -s "$SLS_DIR/SLSsteam.so" "$f"; then
+            dim "  the active SLSsteam.so is this rollback target, restored by 'moon64 off'; neither file is a leftover"
+        fi
+    else
+        warn "$f no longer matches the upstream download recorded in $state"
+    fi
+    return 0
+}
+
+# check_desktop_entries <active SLSsteam bits> — report where the Steam desktop
+# entries point. Returns the number of blocking problems: an entry `on` would
+# refuse to rewrite, or one that bypasses the wrapper while 64-bit is active.
+check_desktop_entries() {
+    local active="$1" name f src state prog found=0 problems=0
+    printf '%s\n' "-- desktop entry --"
+    for name in "${STEAM_DESKTOP_NAMES[@]}"; do
+        f="$APPS_DIR/$name"
+        if [ -f "$f" ]; then
+            src="$f"
+        elif ! src="$(system_desktop_file "$name")"; then
+            continue
+        fi
+        found=1
+        state="$(desktop_entry_state "$src")"
+        case "$state" in
+            ours)
+                ok "$src starts the wrapper ($SLS_WRAPPER)"
+                ;;
+            invalid)
+                bad "$src: an Exec= line is not a recognisable Steam launch; 'moon64 on' will refuse to rewrite it"
+                problems=$((problems + 1))
+                ;;
+            *)
+                if [ "$state" = partial ]; then
+                    prog="Steam directly from some of its actions"
+                else
+                    prog="${state#foreign }"
+                fi
+                if [ "$active" = 64 ]; then
+                    bad "$src runs $prog, not the wrapper — a normal Steam launch skips the 64-bit stack; run 'moon64 on'"
+                    problems=$((problems + 1))
+                else
+                    dim "$src runs $prog; 'moon64 on' points it at $SLS_WRAPPER"
+                fi
+                [ "$src" = "$f" ] || dim "  system entry: 'moon64 on' writes a user-level override to $f"
+                ;;
+        esac
+        if { [ -f "$f.moon64-bak" ] || [ -e "$f.moon64-created" ]; } && [ -e "$f" ] \
+            && ! desktop_is_ours "$f" && ! { [ -f "$f.moon64-bak" ] && cmp -s "$f" "$f.moon64-bak"; }; then
+            dim "  changed since 'moon64 on'; 'moon64 off' keeps this version"
+        else
+            [ -f "$f.moon64-bak" ] && dim "  original saved as $f.moon64-bak ('moon64 off' restores it)"
+            [ -e "$f.moon64-created" ] && dim "  user-level override created by moon64 ('moon64 off' removes it)"
+        fi
+    done
+    [ "$found" = 1 ] || warn "no Steam desktop entry in $APPS_DIR or \$XDG_DATA_DIRS; start Steam with $SLS_WRAPPER"
+    return "$problems"
+}
+
 cmd_doctor() {
     local problems=0 sls staged crbits dep_target="" env_val
     printf '%s\n' "-- 64-bit readiness --"
@@ -1155,6 +1678,7 @@ cmd_doctor() {
     else
         bad "no 64-bit SLSsteam: active=${sls:-missing} staged=${staged:-missing}"; problems=$((problems+1))
     fi
+    report_sls64_origin "$sls"
 
     if [ -n "$dep_target" ]; then
         check_slssteam_runtime_deps "$dep_target" || problems=$((problems+1))
@@ -1185,6 +1709,8 @@ cmd_doctor() {
         dim "environment.d: STEAM_FORCE_CLIENT=$env_val"
     fi
 
+    check_rollback_target "$sls" || problems=$((problems + $?))
+    check_desktop_entries "$sls" || problems=$((problems + $?))
 
     check_proton_state
     printf '%s\n' "-- known 64-bit limits --"
@@ -1200,8 +1726,9 @@ usage() {
     cat <<EOF
 moon64 — 64-bit Steam client switcher for the Luna/LuaTools stack
 
-  moon64 on          activate the 64-bit steamrt64 client + 64-bit libraries
-  moon64 off         restore the 32-bit ubuntu12_32 stack
+  moon64 on          activate the 64-bit steamrt64 client + 64-bit libraries and
+                     point the Steam desktop entry at the SLSsteam wrapper
+  moon64 off         restore the 32-bit ubuntu12_32 stack and the desktop entry
   moon64 stop-steam  gracefully quit a running Steam client and wait for file release
   moon64 status      staged vs active components, and the selected client
   moon64 doctor      check whether the 64-bit path can work, and why not
