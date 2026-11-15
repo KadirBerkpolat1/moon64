@@ -181,4 +181,18 @@ fi
 # Proton/Wine variables (WINEDLLOVERRIDES, PROTON_*) are intentionally untouched
 # so user or per-game launch-option overrides reach Steam and Proton unchanged.
 # (Only the detached Lumen sidecar above strips loader vars for itself.)
+
+# glibc >= 2.38 shares the pthread stack cache across link-map namespaces. A
+# stack first allocated by libcurl's DNS resolver thread inside SLSsteam's
+# LD_AUDIT namespace has its thread-local blocks freed by the other namespace's
+# libc when the stack is reused, crashing the client in _int_free during the
+# startup appinfo provisioning. Disabling the cache removes the shared object
+# that the wrong allocator frees. Merge with any tunables the user set and keep
+# a stack_cache_size the user already chose.
+_slsm_tunable="glibc.pthread.stack_cache_size=0"
+case ":${GLIBC_TUNABLES:-}:" in
+    *:glibc.pthread.stack_cache_size=*) ;;
+    ::) export GLIBC_TUNABLES="$_slsm_tunable" ;;
+    *) export GLIBC_TUNABLES="${GLIBC_TUNABLES}:${_slsm_tunable}" ;;
+esac
 exec "$STEAM_BIN" "$@"

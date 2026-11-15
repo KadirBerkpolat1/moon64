@@ -70,6 +70,7 @@ cat > "$STEAM_DIR/steam.sh" <<SH
     printf 'PROTON_NO_ESYNC=%s\n' "\${PROTON_NO_ESYNC-<UNSET>}"
     printf 'PROTON_USE_WINED3D=%s\n' "\${PROTON_USE_WINED3D-<UNSET>}"
     printf 'PROTON_EXTRA_CUSTOM=%s\n' "\${PROTON_EXTRA_CUSTOM-<UNSET>}"
+    printf 'GLIBC_TUNABLES=%s\n' "\${GLIBC_TUNABLES-<UNSET>}"
     printf 'ARGS=%s\n' "\$*"
 } > "$DUMP_FILE"
 SH
@@ -107,6 +108,7 @@ assert_eq "case1 PROTON_NO_ESYNC preserved" "1" "$(val_of PROTON_NO_ESYNC)"
 assert_eq "case1 PROTON_USE_WINED3D preserved" "0" "$(val_of PROTON_USE_WINED3D)"
 assert_eq "case1 PROTON_EXTRA_CUSTOM preserved" "keep me=1" "$(val_of PROTON_EXTRA_CUSTOM)"
 assert_eq "case1 args preserved" "--foo bar baz" "$(val_of ARGS)"
+assert_eq "case1 GLIBC_TUNABLES set when unset" "glibc.pthread.stack_cache_size=0" "$(val_of GLIBC_TUNABLES)"
 
 # Case 2: Unset WINEDLLOVERRIDES and PROTON_* stay unset
 rm -f "$DUMP_FILE"
@@ -165,6 +167,18 @@ case "$err5" in
     *"SLSM_ALLOW_UNVERIFIED_NETSOCK=1"*) pass "case5 stderr warns on override" ;;
     *) fail "case5 stderr warns on override" "got: $err5" ;;
 esac
+
+# Case 6: an existing GLIBC_TUNABLES is kept and ours appended exactly once
+rm -f "$DUMP_FILE"
+env -i \
+    PATH="$FAKE_BIN:/usr/bin:/bin" \
+    HOME="$FAKE_HOME" \
+    MOON64_DIR="$FAKE_MOON" \
+    GLIBC_TUNABLES="glibc.malloc.check=1" \
+    bash "$REPO_ROOT/bin/wrapper.64.sh"
+dump1="$(cat "$DUMP_FILE")"
+assert_eq "case6 GLIBC_TUNABLES merges without clobber" \
+    "glibc.malloc.check=1:glibc.pthread.stack_cache_size=0" "$(val_of GLIBC_TUNABLES)"
 
 printf 'Summary: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
