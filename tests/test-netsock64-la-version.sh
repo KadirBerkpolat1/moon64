@@ -103,6 +103,26 @@ EOF
         else
             fail "probe: compile host probe" "gcc failed"
         fi
+        cp "$PROBE_BIN" "$TMP_ROOT/steam"
+        cp "$PROBE_BIN" "$TMP_ROOT/notsteam"
+        mkdir -p "$TMP_ROOT/home-steam/.local/share/moon64" \
+                 "$TMP_ROOT/home-other/.local/share/moon64"
+
+        HOME="$TMP_ROOT/home-steam" LD_AUDIT="$SO" "$TMP_ROOT/steam" >/dev/null 2>&1
+        steam_log="$TMP_ROOT/home-steam/.local/share/moon64/moon64-netsock.log"
+        if [ -f "$steam_log" ] && grep -Fq 'audit loaded, la_version ' "$steam_log"; then
+            pass "probe: steam-named host writes audit loaded log line"
+        else
+            fail "probe: steam-named host writes audit loaded log line" "missing or empty log: $steam_log"
+        fi
+
+        HOME="$TMP_ROOT/home-other" LD_AUDIT="$SO" "$TMP_ROOT/notsteam" >/dev/null 2>&1
+        other_log="$TMP_ROOT/home-other/.local/share/moon64/moon64-netsock.log"
+        if [ ! -e "$other_log" ]; then
+            pass "probe: non-steam host does not write audit loaded log"
+        else
+            fail "probe: non-steam host does not write audit loaded log" "unexpected log: $other_log"
+        fi
     fi
 else
     printf 'SKIP [compiler checks]: gcc not installed\n'
