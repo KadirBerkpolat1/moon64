@@ -137,8 +137,6 @@ command -v readelf >/dev/null || die "readelf (binutils) is required"
 command -v ldd     >/dev/null || die "ldd is required"
 
 [ -f "$HERE/bin/moon64" ] || die "bin/moon64 missing from the checkout"
-bash "$HERE/bin/moon64" stop-steam || die "cannot stop running Steam; close it manually and re-run"
-
 mkdir -p "$MOON_DIR" || die "cannot create $MOON_DIR"
 
 # is_elf64 <file> — true when the file exists and is a 64-bit ELF.
@@ -336,6 +334,9 @@ if ! case "$ldcache" in *libcurl.so.4*) true ;; *) false ;; esac; then
     dim "  install the 64-bit curl runtime (e.g. curl / libcurl4)"
 fi
 ok "staged $MOON_DIR/SLSsteam.so.64 (built from source)"
+
+# Stop Steam only after the gate and build succeed, right before touching live files.
+bash "$HERE/bin/moon64" stop-steam || die "cannot stop running Steam; close it manually and re-run"
 
 # Keep the 32-bit original next to the active file, so `moon64 off` can restore
 # it without re-downloading. Only the first run needs to save it.
