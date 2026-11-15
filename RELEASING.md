@@ -99,7 +99,8 @@ gh release create <tag> --repo KadirBerkpolat1/slsteam-moon-64 \
 | no `SLSsteam.so.sha256` published | warns, and relies on the `binary_sha256=` binding |
 | `SLSsteam.so` is a 64-bit x86-64 ELF shared object | stops; nothing staged |
 | exactly one `binary_sha256=` in `pattern-status.txt`, equal to the download | stops; nothing staged |
-| `netsock64.so` download | builds it with `gcc`, or without `gcc` warns that the P2P cert patch is inactive |
+| `netsock64.so` download, when `pattern-status.txt` has no `netsock64_sha256=` line | builds it with `gcc`, or without `gcc` warns that the P2P cert patch is inactive |
+| `netsock64.so` download, when `pattern-status.txt` names one with `netsock64_sha256=` | stops; nothing staged |
 | `netsock64.so.sha256` matches, when published | stops; nothing staged |
 | no `netsock64.so.sha256` published | warns, and relies on the `netsock64_sha256=` binding |
 | `netsock64.so` is a 64-bit x86-64 ELF shared object | stops; nothing staged |

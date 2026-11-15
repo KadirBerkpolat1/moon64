@@ -206,10 +206,13 @@ A failed check stops the install, with nothing staged. When `SLSsteam.so` or
 its `pattern-status.txt` cannot be downloaded (for example offline),
 `install.sh` says so and builds from source instead, under the usual
 requirements and the glibc >= 2.38 floor. When the release has no
-`netsock64.so`, it is built from `patches/netsock64` if that source and `gcc`
-are present; otherwise the install still succeeds and says that the P2P cert
-patch is inactive. The final summary, `~/.local/share/moon64/slsteam64.state`,
-`netsock64.state` and `moon64 doctor` all say where each binary came from.
+`netsock64.so` and its `pattern-status.txt` names none, it is built from
+`patches/netsock64` if that source and `gcc` are present; otherwise the install
+still succeeds and says that the P2P cert patch is inactive. When
+`pattern-status.txt` names a `netsock64.so` (`netsock64_sha256=`) that cannot
+be downloaded, the install stops with nothing staged. The final summary,
+`~/.local/share/moon64/slsteam64.state`, `netsock64.state` and `moon64 doctor`
+all say where each binary came from.
 
 The current release, slsteam-moon-64
 [`v1.0.0`](https://github.com/KadirBerkpolat1/slsteam-moon-64/releases/tag/v1.0.0)

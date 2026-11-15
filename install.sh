@@ -545,22 +545,36 @@ status_sha256() {
     printf '%s' "${val,,}"
 }
 
+# status_names <pattern-status.txt> <key> — true when any line sets <key>=,
+# however many times.
+status_names() {
+    local key="$2" line trimmed
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        case "$trimmed" in "$key"=*) return 0 ;; esac
+    done < "$1"
+    return 1
+}
+
 # fetch_netsock64_into <tmp> <release dir url> — download the release's
 # netsock64.so into <tmp> and check it the way SLSsteam.so is checked: its
 # .sha256 when published, the x86-64 ELF class, and the one netsock64_sha256=
 # line in <tmp>/res/pattern-status.txt. Returns 0 when it passes, 1 when the
-# release has none to download, 2 when a check fails.
+# release neither has one nor names one (NETSOCK64_NOT_PUBLISHED=1), 2 when a
+# check fails or pattern-status.txt names one that cannot be downloaded.
 fetch_netsock64_into() {
     local tmp="$1" rel="$2" got want="" bound info
     NETSOCK64_URL="$rel/netsock64.so"
     NETSOCK64_SHA_PUBLISHED=no
     if ! curl -fsSL --connect-timeout 15 --max-time 60 -o "$tmp/netsock64.so" "$NETSOCK64_URL" 2>/dev/null; then
         rm -f "$tmp/netsock64.so"
-        if status_sha256 "$tmp/res/pattern-status.txt" netsock64_sha256 >/dev/null; then
-            warn "cannot download $NETSOCK64_URL, although $rel/pattern-status.txt names one"
-        else
-            dim "the release has no $NETSOCK64_URL"
+        if status_names "$tmp/res/pattern-status.txt" netsock64_sha256; then
+            bad "$rel/pattern-status.txt names a netsock64.so (netsock64_sha256=), but $NETSOCK64_URL cannot be downloaded"
+            return 2
         fi
+        dim "the release has no $NETSOCK64_URL and its pattern-status.txt names none"
+        NETSOCK64_NOT_PUBLISHED=1
         return 1
     fi
 
@@ -711,6 +725,7 @@ fi
 
 sls64_path=""
 NETSOCK64_PREBUILT=""
+NETSOCK64_NOT_PUBLISHED=0
 if [ "$prebuilt" = 1 ]; then
     fetch_prebuilt
     case $? in
@@ -849,7 +864,7 @@ elif [ -f "$netsock64_src" ] && command -v gcc >/dev/null 2>&1; then
     ok "built $MOON_DIR/netsock64.so"
 else
     if [ -f "$netsock64_src" ]; then why="gcc is not installed to build it"; else why="this copy of moon64 has no patches/netsock64 to build it from"; fi
-    [ "$prebuilt" = 1 ] && why="the release has no netsock64.so and $why"
+    [ "$NETSOCK64_NOT_PUBLISHED" = 1 ] && why="the release has no netsock64.so and $why"
     if [ -f "$MOON_DIR/netsock64.so" ]; then
         warn "$why; keeping the netsock64.so from an earlier install"
         netsock64_path="kept from an earlier install"

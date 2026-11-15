@@ -102,7 +102,8 @@ REL32_SHA="$(sha "$REL32/SLSsteam-Any-release.7z")"
 STATUS=$'arch=x86_64\nrequired=38\nresolved=38\npending=0\nrunipcframe_tail=ready'
 
 # make_release <name> [variant] — the project's release assets. Variants change
-# only netsock64: mismatch, unbound, repeated, bad-sha, elf32, no-sha, absent.
+# only netsock64: mismatch, unbound, repeated, bad-sha, elf32, no-sha, absent
+# (no file, no binding line), bound-missing (binding line, but no file).
 make_release() {
     local d="$TMP_ROOT/rel-$1" variant="${2:-}" ns_line
     mkdir -p "$d"
@@ -115,7 +116,7 @@ make_release() {
     fi
     case "$variant" in
         bad-sha) printf '%064d  netsock64.so\n' 0 > "$d/netsock64.so.sha256" ;;
-        no-sha|absent) ;;
+        no-sha|absent|bound-missing) ;;
         *) printf '%s  netsock64.so\n' "$(sha "$d/netsock64.so")" > "$d/netsock64.so.sha256" ;;
     esac
     ns_line="netsock64_sha256=$(sha "$d/netsock64.so")"
@@ -125,7 +126,7 @@ make_release() {
         repeated) ns_line="$ns_line"$'\n'"$ns_line" ;;
     esac
     printf '%s\nbinary_sha256=%s\n%s' "$STATUS" "$(sha "$d/SLSsteam.so")" "${ns_line:+$ns_line$'\n'}" > "$d/pattern-status.txt"
-    [ "$variant" != absent ] || rm -f "$d/netsock64.so"
+    case "$variant" in absent|bound-missing) rm -f "$d/netsock64.so" ;; esac
     printf '%s' "$d"
 }
 
@@ -219,7 +220,7 @@ done
 assert_contains "a4: client is steamrt64" "STEAM_FORCE_CLIENT=steamrt64" "$(cat "$sb/launch.log" 2>/dev/null)"
 
 # --- (b) netsock64 fails a check: refused, nothing staged -------------------
-for variant in mismatch unbound repeated bad-sha elf32; do
+for variant in mismatch unbound repeated bad-sha elf32 bound-missing; do
     rel="$(make_release "b-$variant" "$variant")"
     sb="$(make_sandbox "b-$variant")"
     out="$(run "$sb" "$rel" bash "$REPO_ROOT/install.sh" --prebuilt 2>&1)"; rc=$?
@@ -229,6 +230,10 @@ for variant in mismatch unbound repeated bad-sha elf32; do
         unbound|repeated) assert_contains "b-$variant: says why" "must name the netsock64.so released with it with exactly one netsock64_sha256= line" "$out" ;;
         bad-sha) assert_contains "b-$variant: says why" "prebuilt netsock64.so sha256 $(sha "$rel/netsock64.so") does not match the published 0000" "$out" ;;
         elf32) assert_contains "b-$variant: says why" "prebuilt netsock64.so is not a 64-bit x86-64 shared object" "$out" ;;
+        bound-missing)
+            assert_contains "b-$variant: says why" "$rel/pattern-status.txt names a netsock64.so (netsock64_sha256=), but file://$rel/netsock64.so cannot be downloaded" "$out"
+            assert_not_contains "b-$variant: does not claim the release has none" "the release has no" "$out"
+            assert_not_contains "b-$variant: does not degrade" "the P2P cert patch will be inactive" "$out" ;;
     esac
     assert_contains "b-$variant: refuses instead of falling back" "refusing to stage an unverified prebuilt netsock64.so; nothing was staged" "$out"
     assert_absent "b-$variant: no SLSsteam.so.64" "$sb/moon64/SLSsteam.so.64"
