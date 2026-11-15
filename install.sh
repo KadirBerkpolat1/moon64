@@ -23,7 +23,7 @@
 #   ~/.local/share/Lumen/luatools/plugin        LuaTools plugin tree (same flag)
 set -uo pipefail
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MOON_DIR="${MOON64_DIR:-$HOME/.local/share/moon64}"
 SLS_DIR="$HOME/.local/share/SLSsteam"
 CR_DIR="$HOME/.local/share/CloudRedirect"
@@ -36,6 +36,84 @@ warn() { printf '%s warn %s %s\n' "$c_yel" "$c_nc" "$*"; }
 bad()  { printf '%s fail %s %s\n' "$c_red" "$c_nc" "$*"; }
 dim()  { printf '%s      %s%s\n' "$c_dim" "$*" "$c_nc"; }
 die()  { bad "$*"; exit 1; }
+
+# is_uint <val> — true for non-empty unsigned decimal integers.
+is_uint() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# check_pattern_gate <src_dir> — fail-closed gate on res/pattern-status.txt.
+# Staging an incomplete x86_64 pattern table makes Patterns::init() fail and
+# SLSsteam aborts all injection, silently leaving Steam unpatched.
+check_pattern_gate() {
+    local src_dir="$1"
+    local status_file="$src_dir/res/pattern-status.txt"
+    local arch="" required="" resolved="" pending="" tail_state=""
+    local seen_arch=0 seen_required=0 seen_resolved=0 seen_pending=0 seen_tail=0
+    local line trimmed key val reason=""
+
+    if [ ! -f "$status_file" ]; then
+        reason="status file missing: $status_file"
+    else
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%$'\r'}"
+            trimmed="${line#"${line%%[![:space:]]*}"}"
+            case "$trimmed" in
+                ''|'#'*) continue ;;
+                *=*)
+                    key="${trimmed%%=*}"
+                    val="${trimmed#*=}"
+                    case "$key" in
+                        arch)             seen_arch=$((seen_arch + 1)); arch="$val" ;;
+                        required)         seen_required=$((seen_required + 1)); required="$val" ;;
+                        resolved)         seen_resolved=$((seen_resolved + 1)); resolved="$val" ;;
+                        pending)          seen_pending=$((seen_pending + 1)); pending="$val" ;;
+                        runipcframe_tail) seen_tail=$((seen_tail + 1)); tail_state="$val" ;;
+                    esac
+                    ;;
+            esac
+        done < "$status_file"
+
+        if [ "$seen_arch" -ne 1 ] || [ "$arch" != "x86_64" ]; then
+            reason="arch must be x86_64 (got: ${arch:-<missing>})"
+        elif [ "$seen_required" -ne 1 ] || ! is_uint "$required"; then
+            reason="required must be present and numeric (got: ${required:-<missing>})"
+        elif [ "$seen_resolved" -ne 1 ] || ! is_uint "$resolved"; then
+            reason="resolved must be present and numeric (got: ${resolved:-<missing>})"
+        elif [ "$seen_pending" -ne 1 ] || ! is_uint "$pending"; then
+            reason="pending must be present and numeric (got: ${pending:-<missing>})"
+        elif [ "$seen_tail" -ne 1 ] || [ "$tail_state" != "ready" ]; then
+            reason="runipcframe_tail must be 'ready' (got: ${tail_state:-<missing>})"
+        elif [ "$((10#$resolved + 10#$pending))" -ne "$((10#$required))" ]; then
+            reason="resolved ($resolved) + pending ($pending) != required ($required)"
+        elif [ "$((10#$pending))" -ne 0 ]; then
+            reason="pending is $pending (must be 0)"
+        fi
+    fi
+
+    if [ -n "$reason" ]; then
+        bad "the x86_64 pattern table is incomplete or invalid: $reason"
+        dim "  status file: $status_file"
+        dim "  arch=${arch:-?} required=${required:-?} resolved=${resolved:-?} pending=${pending:-?} runipcframe_tail=${tail_state:-?}"
+        dim "  A build now would load and then decline to patch, leaving Steam"
+        dim "  unpatched with no FakeAppIds. See PORTING.md in $src_dir."
+        dim "  Set SLSM_ALLOW_INCOMPLETE_PATTERNS=1 to stage it anyway for testing."
+        if [ "${SLSM_ALLOW_INCOMPLETE_PATTERNS:-0}" = "1" ]; then
+            warn "WARNING: BYPASSING x86_64 PATTERN-TABLE GATE (SLSM_ALLOW_INCOMPLETE_PATTERNS=1) — build may leave Steam unpatched!"
+            return 0
+        fi
+        return 1
+    fi
+
+    ok "x86_64 pattern table complete (arch=$arch, $resolved/$required resolved, pending=$pending, runipcframe_tail=$tail_state)"
+    return 0
+}
+
+# Allow sourcing install.sh in unit tests without executing installer steps.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 with_cloudredirect=0
 with_lumen_patch=0
@@ -188,22 +266,7 @@ fi
 # missing required pattern makes Patterns::init() fail and SLSsteam aborts the
 # whole injection, so the client would start completely unpatched -- FakeAppIds
 # and everything else silently off. Staging that looks like success and is not.
-if [ -f "$src_dir/res/pattern-status.txt" ]; then
-    pending="$(awk -F= '$1=="pending"{print $2}' "$src_dir/res/pattern-status.txt")"
-    tail_state="$(awk -F= '$1=="runipcframe_tail"{print $2}' "$src_dir/res/pattern-status.txt")"
-    if [ "${pending:-0}" != 0 ] || [ "${tail_state:-ready}" != ready ]; then
-        bad "the x86_64 pattern table is incomplete"
-        dim "  required patterns still missing: ${pending:-?}"
-        dim "  RunIPCFrame dispatch tail: ${tail_state:-?}"
-        dim "  A build now would load and then decline to patch, leaving Steam"
-        dim "  unpatched with no FakeAppIds. See PORTING.md in $src_dir."
-        dim "  Set SLSM_ALLOW_INCOMPLETE_PATTERNS=1 to stage it anyway for testing."
-        [ "${SLSM_ALLOW_INCOMPLETE_PATTERNS:-0}" = 1 ]             || die "refusing to stage an incomplete build"
-        warn "staging anyway (SLSM_ALLOW_INCOMPLETE_PATTERNS=1)"
-    else
-        ok "x86_64 pattern table complete"
-    fi
-fi
+check_pattern_gate "$src_dir" || die "refusing to stage an incomplete build"
 
 # Build requirements: a host C++20 toolchain, make, and the 64-bit dev
 # libraries the fork links or generates against.
