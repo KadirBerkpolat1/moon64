@@ -25,34 +25,67 @@ AGPL-3.0 — see [`LICENSE`](LICENSE).
   only with `--with-cloudredirect`), and the Lumen and LuaTools fork trees
   (only with `--with-lumen-patch`). Each is cloned from the pin in
   [`versions.env`](versions.env) and keeps its own licence.
-  `netsock64.so` is built from this repo's own source.
+  `netsock64.so` is built from this repo's own source unless it is
+  downloaded with `--prebuilt` (below).
 - **Downloaded at install time, not redistributed here:** upstream
   [AceSLS/SLSsteam](https://github.com/AceSLS/SLSsteam)'s 32-bit release
   (AGPL-3.0), only when no 32-bit SLSsteam is installed, as the rollback
   target. Pinned with its SHA-256 in [`versions.env`](versions.env).
-  With `--prebuilt`, also the 64-bit `SLSsteam.so` release asset of
+  With `--prebuilt` (which is what the [one-liner](#quickstart) runs), also the
+  64-bit `SLSsteam.so` and `netsock64.so` release assets of
   [slsteam-moon-64](https://github.com/KadirBerkpolat1/slsteam-moon-64)
-  (AGPL-3.0-only) instead of building it — see
-  [Prebuilt `SLSsteam.so`](#prebuilt-slssteamso).
+  (AGPL-3.0-only) instead of building them — see
+  [Prebuilt binaries](#prebuilt-binaries).
 
 ## Quickstart
 
-On a clean machine, do these first:
+Install the **native** Steam client (not Flatpak) and start it once, so it
+downloads its 64-bit client into `steamrt64/`. Then:
 
-1. Install the **native** Steam client (not Flatpak) and start it once, so it
-   downloads its 64-bit client into `steamrt64/`.
-2. Optional: install upstream [SLSsteam](https://github.com/AceSLS/SLSsteam)
-   (the 32-bit release) first if you want `moon64 off` to return to a working
-   32-bit SLSsteam stack. Without it, `install.sh` fetches the upstream 32-bit
-   library as the rollback target and `off` returns to stock Steam — see
-   [Rollback](#rollback).
-3. Optional: install [Lumen](https://github.com/swwayps/lumen) if you want
-   `--with-lumen-patch`, and the 32-bit CloudRedirect if you want cloud saves.
-4. Install everything in [Requirements](#requirements).
+```sh
+curl -fsSL https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/get.sh | bash
+~/.local/share/moon64/moon64 doctor
+~/.local/share/moon64/moon64 on
+```
 
-Then close Steam, or let the installer close it for you: it stops an idle
-Steam client itself (`moon64 stop-steam`) and refuses only while a game is
-running.
+[`get.sh`](get.sh) downloads `install.sh`, `bin/moon64`, `bin/wrapper.64.sh`
+and `versions.env` with `curl` into a temporary directory, prints each URL
+and SHA-256, and runs `install.sh --prebuilt` from there. That downloads the
+prebuilt `SLSsteam.so` and `netsock64.so` and verifies both (see
+[Prebuilt binaries](#prebuilt-binaries)): no `git`, no compiler. It stops an
+idle Steam client itself (`moon64 stop-steam`) and refuses only while a game
+is running.
+
+`get.sh` never installs packages. If prerequisites are missing it shows them
+with the package-manager command, and the re-run that lets `install.sh`
+install them through a `sudo -n` that never prompts:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/get.sh | bash -s -- --install-deps
+```
+
+`bash get.sh --dry-run` prints what it would download and run and changes
+nothing. `MOON64_REF` picks the moon64 branch, tag or commit (default `main`);
+`MOON64_DIR` and `SLSM_PREBUILT_URL` reach `install.sh` unchanged. If
+`install.sh` fails, `get.sh` puts `~/.local/share/moon64` back exactly as it
+found it, or removes it if this run created it.
+
+The install only stages files; nothing changes until `moon64 on`.
+`moon64 doctor` is the pre-flight: fix everything it reports as bad before
+running `moon64 on`. After `on`, start Steam normally.
+
+Optional, before installing:
+
+- Upstream [SLSsteam](https://github.com/AceSLS/SLSsteam) (the 32-bit
+  release), if you want `moon64 off` to return to a working 32-bit SLSsteam
+  stack. Without it, `install.sh` fetches the upstream 32-bit library as the
+  rollback target and `off` returns to stock Steam — see
+  [Rollback](#rollback).
+- [Lumen](https://github.com/swwayps/lumen) for `--with-lumen-patch`, and the
+  32-bit CloudRedirect for cloud saves. Both flags need the source checkout
+  below.
+
+### Build from source (developers)
 
 ```sh
 git clone https://github.com/KadirBerkpolat1/moon64.git
@@ -62,11 +95,10 @@ cd moon64
 ~/.local/share/moon64/moon64 on
 ```
 
-`install.sh` only stages files; the 32-bit stack stays live until `moon64 on`.
-`moon64 doctor` is the pre-flight: fix everything it reports as bad before
-running `moon64 on`. After `on`, start Steam normally.
-
-Optional pieces are flags to the same installer:
+This clones slsteam-moon-64 and compiles `SLSsteam.so` and `netsock64.so` on
+this machine, so it needs the toolchain in [Requirements](#requirements).
+`./install.sh --prebuilt` from a checkout is the binary path again. Optional
+pieces are flags to the same installer:
 
 ```sh
 ./install.sh --with-cloudredirect --with-lumen-patch
@@ -74,11 +106,16 @@ Optional pieces are flags to the same installer:
 
 If prerequisites are missing, `install.sh` lists them with the package-manager
 command to install them; `./install.sh --install-deps` runs that command for
-you (see [Requirements](#requirements)). `./install.sh --prebuilt` downloads
-the 64-bit `SLSsteam.so` instead of building it, so it needs no C++ toolchain
-(see [Prebuilt `SLSsteam.so`](#prebuilt-slssteamso)).
+you.
 
 ## Requirements
+
+The binary install (`get.sh`, or `install.sh --prebuilt`) needs **no compiler
+and no `git`**: `SLSsteam.so` and `netsock64.so` come from the release. A source
+build still needs them because it compiles both on this machine: `SLSsteam.so`
+from the C++20 slsteam-moon-64 source (cloned with `git`, built with `make` and
+`g++` against the libcurl and OpenSSL headers), and `netsock64.so` from
+`patches/netsock64/steamclient_audit64.c` with `gcc`.
 
 | Requirement | Needed for | Checked by |
 |---|---|---|
@@ -87,9 +124,9 @@ the 64-bit `SLSsteam.so` instead of building it, so it needs no C++ toolchain
 | Upstream 32-bit SLSsteam | the rollback target | fetched by `install.sh` when absent; reported by `moon64 doctor` — see [Rollback](#rollback) |
 | `7z` (p7zip) or `bsdtar` (libarchive) | unpacking the upstream 32-bit release | `install.sh` (warning only: without it there is no rollback target; installed by `--install-deps`) |
 | Running as your desktop user, not root | file ownership under `~/.local/share` | `install.sh` |
-| `git`, `curl`, `file`, `readelf` (binutils), `ldd` | fetching sources, ELF checks | `install.sh` (installed by `--install-deps`; `git` only for a source build) |
-| `gcc`, `g++` (C++20), `make` | building `netsock64.so` (`gcc`) and `SLSsteam.so` (all three) | `install.sh` (installed by `--install-deps`; `--prebuilt` needs only `gcc` unless it falls back to a build) |
-| libcurl and OpenSSL development headers | building `SLSsteam.so` | `install.sh` (installed by `--install-deps`; not needed by `--prebuilt` unless it falls back to a build) |
+| `curl`, `file`, `readelf` (binutils), `ldd` | downloads and ELF checks | `install.sh` (installed by `--install-deps`) |
+| `git`, `g++` (C++20), `make`, libcurl and OpenSSL development headers | **source build only**: cloning slsteam-moon-64 and compiling `SLSsteam.so`. The binary install needs none of them | `install.sh` (installed by `--install-deps`; with `--prebuilt` only asked for if no usable prebuilt `SLSsteam.so` can be downloaded) |
+| `gcc` | **source build only**: compiling `netsock64.so`. With `--prebuilt`, only if the release has no `netsock64.so`, and then optional: without `gcc` the install succeeds and the P2P cert patch is inactive | `install.sh` |
 | 64-bit `libdbus-1.so.3` and a `libstdc++` with `GLIBCXX_3.4.32` (GCC 13+) | loading `SLSsteam.so` in the client | `install.sh`, `moon64 doctor` |
 | 64-bit `libcurl.so.4` | SLSsteam's network features (loaded at runtime) | `install.sh` (warning only) |
 | `cmake` | `--with-cloudredirect` only | `bin/build-cloudredirect.sh` |
@@ -117,7 +154,13 @@ printed command yourself, then run `install.sh` again. The runtime libraries
 (`libdbus`, `libstdc++`, `libcurl.so.4`) and `cmake` are not covered by this
 and are still reported by the checks listed in the table.
 
-On Arch Linux and derivatives, this covers everything in the table in one go:
+On Arch Linux and derivatives, this covers the binary install:
+
+```sh
+sudo pacman -S --needed curl file binutils dbus libarchive
+```
+
+and this everything in the table, for a source build:
 
 ```sh
 sudo pacman -S --needed base-devel git curl openssl file binutils dbus cmake libarchive
@@ -127,7 +170,7 @@ sudo pacman -S --needed base-devel git curl openssl file binutils dbus cmake lib
 Steam roots listed above; a Flatpak install under
 `~/.var/app/com.valvesoftware.Steam` is never found.
 
-### Prebuilt `SLSsteam.so`
+### Prebuilt binaries
 
 ```sh
 ./install.sh --prebuilt
@@ -135,43 +178,48 @@ Steam roots listed above; a Flatpak install under
 
 downloads the 64-bit `SLSsteam.so` from `SLSM_PREBUILT_URL`, or by default
 from the slsteam-moon-64 release asset named by `SLS64_PREBUILT_URL` in
-[`versions.env`](versions.env), and stages it without building anything. The
-release must publish `pattern-status.txt` next to the library, naming the
-library it was measured on, and `install.sh` checks the download as strictly
-as a build:
+[`versions.env`](versions.env), and `netsock64.so` from the same release
+directory, and stages them without compiling anything. The release must
+publish `pattern-status.txt` next to the libraries, naming both, and
+`install.sh` checks the downloads as strictly as a build:
 
-- `<url>.sha256`, when published, must match; a mismatch stops the install.
-  Without one, `install.sh` warns and relies on the next check.
+- `<file>.sha256`, when published, must match; a mismatch stops the install.
+  Without one, `install.sh` warns and relies on the binding below.
 - `pattern-status.txt` must contain exactly one `binary_sha256=` line equal to
-  the downloaded library's SHA-256, so a status file from another build cannot
-  vouch for it.
-- The file must be a 64-bit x86-64 ELF shared object.
+  the downloaded `SLSsteam.so`'s SHA-256, and exactly one `netsock64_sha256=`
+  line equal to the downloaded `netsock64.so`'s, so a status file from another
+  build cannot vouch for either.
+- Both must be 64-bit x86-64 ELF shared objects.
 - `pattern-status.txt` must pass the same pattern gate as a source build.
-- Its libraries, symbol versions and glibc requirement must resolve on this
-  host.
+- `SLSsteam.so`'s libraries, symbol versions and glibc requirement must
+  resolve on this host.
 
-A failed check stops the install, with nothing staged. When the library or
+A failed check stops the install, with nothing staged. When `SLSsteam.so` or
 its `pattern-status.txt` cannot be downloaded (offline, or no release
 published yet), `install.sh` says so and builds from source instead, under
-the usual requirements and the glibc >= 2.38 floor. The final summary,
-`~/.local/share/moon64/slsteam64.state` and `moon64 doctor` all say which
-path produced `SLSsteam.so.64` and whether the active `SLSsteam.so` is it.
+the usual requirements and the glibc >= 2.38 floor. When the release has no
+`netsock64.so`, it is built from `patches/netsock64` if `gcc` is installed;
+otherwise the install still succeeds and says that the P2P cert patch is
+inactive. The final summary, `~/.local/share/moon64/slsteam64.state`,
+`netsock64.state` and `moon64 doctor` all say where each binary came from.
 
 slsteam-moon-64 has not published a release yet, so for now the default URL
-returns 404 and `--prebuilt` builds from source. [`RELEASING.md`](RELEASING.md)
-lists what a release must contain and how to build it.
+returns 404 and `--prebuilt` (and with it `get.sh`) falls back to the source
+build. [`RELEASING.md`](RELEASING.md) lists what a release must contain and
+how to build it.
 
 ## What is in here
 
 | path | what it is |
 |---|---|
+| `get.sh` | the `curl \| bash` installer: fetches the four files below and runs `install.sh --prebuilt` |
 | `patches/netsock64/steamclient_audit64.c` | `LD_AUDIT` shim that patches the cert-check function in the 64-bit `steamclient.so` at load time |
 | `bin/build-cloudredirect.sh` | builds CloudRedirect 64-bit from a pinned upstream commit |
 | `bin/wrapper.64.sh` | the 64-bit Steam launcher (what `SLSsteam/path/steam` becomes) |
 | `bin/moon64` | `on` / `off` / `status` / `doctor` switcher |
 | `install.sh` | stages every 64-bit piece; activates nothing |
-| `RELEASING.md` | what a slsteam-moon-64 release must contain for `--prebuilt` |
-| `versions.env` | pinned sources: the slsteam-moon-64, Lumen and LuaTools forks, the CloudRedirect commit, the prebuilt `SLSsteam.so` URL and the 32-bit rollback release |
+| `RELEASING.md` | what a slsteam-moon-64 release must contain for `--prebuilt` and `get.sh` |
+| `versions.env` | pinned sources: the slsteam-moon-64, Lumen and LuaTools forks, the CloudRedirect commit, the prebuilt release URL and the 32-bit rollback release |
 
 ## Why a switcher instead of one wrapper
 
@@ -189,7 +237,7 @@ is already on disk before it is used, so recovery never depends on the network.
 | component | 32-bit client | 64-bit client |
 |---|---|---|
 | `SLSsteam.so` | upstream release | built from source at install time (slsteam-moon-64, pinned in `versions.env`), or its release asset with `--prebuilt` |
-| `netsock64.so` (P2P cert patch) | **impossible** — anchor absent | built here |
+| `netsock64.so` (P2P cert patch) | **impossible** — anchor absent | built here, or its release asset with `--prebuilt` |
 | `library-inject.so` (libcurl redirect) | required | **dropped** — the 64-bit client brings its own libcurl |
 | `lib32/libcrypto.so.1.1` | SHA-1 workaround | **dropped** — 32-bit only, irrelevant |
 | `cloud_redirect.so` (cloud saves) | upstream prebuilt | built here with `-DLINUX_32BIT=OFF` |
@@ -226,8 +274,10 @@ to re-derive them for a new client build.
   cannot load.
 - Cloud saves stay inactive if only the 32-bit CloudRedirect pair is installed.
   `moon64 doctor` reports that rather than silently starting without them.
-- `netsock64.so` is built from source at install time; there is no prebuilt
-  binary in the repo, so a stale artifact can never drift from the source.
+- `netsock64.so` is never committed to this repo: it is built from
+  `patches/netsock64` at install time, or downloaded from the slsteam-moon-64
+  release, bound by `netsock64_sha256=` to the `pattern-status.txt` published
+  with it.
 
 ## Desktop entry
 
