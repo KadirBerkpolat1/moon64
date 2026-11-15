@@ -235,11 +235,10 @@ if [ -z "$src_dir" ]; then
     fi
 fi
 
-# Fetch the pinned checkout when it is not present. The fork is private, so a
-# plain git clone would stop at a credential prompt -- which in a
-# non-interactive installer is just a failure. Prefer gh (already
-# authenticated when it is installed), then the git credential helper, and
-# otherwise say precisely what to do instead of dying with "clone failed".
+# Fetch the pinned checkout when it is not present. The fork is a public repo
+# cloned anonymously over HTTPS (the normal path); gh is only used as a
+# convenience when it is already authenticated. GIT_TERMINAL_PROMPT=0 keeps
+# plain git from stopping on a credential prompt in non-interactive runs.
 if [ ! -f "$src_dir/Makefile" ]; then
     command -v git >/dev/null || die "git is required to fetch the SLSsteam source"
     mkdir -p "$(dirname "$src_dir")" || die "cannot create $(dirname "$src_dir")"
@@ -257,11 +256,11 @@ if [ ! -f "$src_dir/Makefile" ]; then
             "$SLS64_REPO" "$src_dir" >/dev/null 2>&1 && cloned=1
     fi
     if [ "$cloned" = 0 ]; then
-        bad "cannot fetch the private SLSsteam fork: $slug"
-        dim "  Option 1: gh auth login, then re-run (gh is used when authenticated)."
-        dim "  Option 2: clone it yourself and pass the path:"
-        dim "            git clone $SLS64_REPO ~/Projects/slsteam-moon-64"
-        dim "            SLS64_SRC=~/Projects/slsteam-moon-64 ./install.sh"
+        bad "cannot fetch SLSsteam fork: $slug (network error or missing SLS64_REF '$SLS64_REF')"
+        dim "  Option 1: clone it yourself and pass the path:"
+        dim "            git clone $SLS64_REPO \$HOME/slsteam-moon-64"
+        dim "            SLS64_SRC=\$HOME/slsteam-moon-64 ./install.sh"
+        dim "  Option 2: if you use gh, run 'gh auth login' and re-run."
         die "no SLSsteam source available"
     fi
     ok "cloned $slug into $src_dir"
@@ -409,8 +408,8 @@ fi
 # menu called six RPCs that were never registered. Install the trees instead.
 
 # fetch_pinned <repo-url> <ref> <dir> -> 0 when <dir> is a usable checkout.
-# Private repos need credentials; a bare git clone stops at a prompt, which in a
-# non-interactive installer just reads as "clone failed".
+# Public repos clone anonymously over HTTPS; gh is used when already
+# authenticated, and GIT_TERMINAL_PROMPT=0 avoids hanging on prompts.
 fetch_pinned() {
     local repo="$1" ref="$2" dir="$3" slug cloned=0
     if [ -f "$dir/.git/HEAD" ]; then
