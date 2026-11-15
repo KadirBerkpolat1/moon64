@@ -42,15 +42,338 @@ require_file_cmd() {
     command -v file >/dev/null 2>&1 || die "file is required"
 }
 
-steam_running() {
-    local pid
-    pid="$(cat "$HOME/.steam/steam.pid" 2>/dev/null || true)"
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+read_steam_pid() {
+    local pid_file="$HOME/.steam/steam.pid" pid=""
+    [ -f "$pid_file" ] || return 1
+    pid="$(tr -d '[:space:]' < "$pid_file" 2>/dev/null || true)"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s' "$pid"
 }
 
-require_steam_stopped() {
-    steam_running && die "Steam is running (pid $(cat "$HOME/.steam/steam.pid" 2>/dev/null)). Close it completely first."
+pid_alive() {
+    local pid="${1:-}" proc_root="${SLSM_PROC_ROOT:-/proc}" stat_line stat_rest state
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    if [ -r "$proc_root/$pid/stat" ]; then
+        stat_line="$(cat "$proc_root/$pid/stat" 2>/dev/null || true)"
+        if [ -n "$stat_line" ]; then
+            stat_rest="${stat_line##*) }"
+            state="${stat_rest%% *}"
+            case "$state" in
+                Z|X|x) return 1 ;;
+            esac
+        fi
+    fi
     return 0
+}
+
+steam_running() {
+    local pid
+    pid="$(read_steam_pid || true)"
+    pid_alive "$pid"
+}
+
+now_ms() {
+    local t="${EPOCHREALTIME:-}" sec usec
+    if [ -n "$t" ]; then
+        sec="${t%%.*}"
+        usec="${t#*.}000"
+        printf '%s' "$(( 10#$sec * 1000 + 10#${usec:0:3} ))"
+    else
+        printf '%s' "$(( $(date +%s) * 1000 ))"
+    fi
+}
+
+timeout_to_ms() {
+    local val="${1:-0}" sec frac
+    case "$val" in
+        ''|*[!0-9.]*|*.*.*) printf '0'; return 0 ;;
+    esac
+    case "$val" in
+        *.*)
+            sec="${val%%.*}"
+            frac="${val#*.}000"
+            sec="${sec:-0}"
+            printf '%s' "$(( 10#$sec * 1000 + 10#${frac:0:3} ))"
+            ;;
+        *)
+            printf '%s' "$(( 10#$val * 1000 ))"
+            ;;
+    esac
+}
+
+find_steam_root() {
+    local r
+    for r in "${STEAM_ROOTS[@]}"; do
+        [ -x "$r/steam.sh" ] && { printf '%s' "$r"; return 0; }
+    done
+    return 1
+}
+
+# Print "<pid>\t<appid>" for the first non-client process carrying a nonzero SteamAppId=.
+find_active_steam_app() {
+    local client_pid="${1:-}" proc_root="${SLSM_PROC_ROOT:-/proc}"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$proc_root" "$client_pid" "$$" <<'PY' 2>/dev/null || true
+import glob, os, sys
+proc_root = sys.argv[1]
+skip = {p for p in sys.argv[2:] if p}
+skip.add(str(os.getpid()))
+for path in glob.glob(os.path.join(proc_root, "[0-9]*", "environ")):
+    pid = path.rsplit("/", 2)[1]
+    if pid in skip:
+        continue
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        continue
+    for item in raw.split(b"\0"):
+        if item.startswith(b"SteamAppId="):
+            val = item[11:].decode("utf-8", "replace").strip()
+            if val and val != "0":
+                print(f"{pid}\t{val}")
+                sys.exit(0)
+PY
+        return 0
+    fi
+
+    local env_file pid entry appid
+    for env_file in "$proc_root"/[0-9]*/environ; do
+        [ -r "$env_file" ] || continue
+        pid="${env_file%/*}"; pid="${pid##*/}"
+        if [ "$pid" = "$client_pid" ] || [ "$pid" = "$$" ]; then
+            continue
+        fi
+        while IFS= read -r -d '' entry || [ -n "$entry" ]; do
+            case "$entry" in
+                SteamAppId=*)
+                    appid="${entry#SteamAppId=}"
+                    if [ -n "$appid" ] && [ "$appid" != "0" ]; then
+                        printf '%s\t%s\n' "$pid" "$appid"
+                        return 0
+                    fi
+                    ;;
+            esac
+        done < "$env_file" 2>/dev/null || true
+    done
+}
+
+# Scan /proc/[0-9]*/maps for processes mapping any swap target.
+# Outputs "UNREADABLE\t<count>" followed by "HOLDER\t<pid> -> <path>" lines.
+scan_mapped_targets() {
+    local proc_root="${SLSM_PROC_ROOT:-/proc}"
+    local -a targets=() raw_targets=(
+        "$SLS_DIR/SLSsteam.so"
+        "$CR_DIR/cloud_redirect.so"
+        "$CR_DIR/cloud_redirect_cli"
+        "$SLS_DIR/path/steam"
+    )
+    local t canon
+    for t in "${raw_targets[@]}"; do
+        targets+=("$t")
+        canon="$(readlink -f "$t" 2>/dev/null || true)"
+        if [ -n "$canon" ] && [ "$canon" != "$t" ]; then
+            targets+=("$canon")
+        fi
+    done
+
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$proc_root" "${targets[@]}" <<'PY' 2>/dev/null || true
+import glob, os, sys
+proc_root = sys.argv[1]
+targets = set(sys.argv[2:])
+unreadable = 0
+holders = []
+for mpath in glob.glob(os.path.join(proc_root, "[0-9]*", "maps")):
+    pid = mpath.rsplit("/", 2)[1]
+    try:
+        with open(mpath, "r", encoding="utf-8", errors="replace") as f:
+            seen = set()
+            for line in f:
+                parts = line.rstrip("\n").split(None, 5)
+                if len(parts) < 6:
+                    continue
+                p = parts[5]
+                if p.endswith(" (deleted)"):
+                    p = p[:-10]
+                if p in targets and p not in seen:
+                    seen.add(p)
+                    holders.append(f"{pid} -> {p}")
+    except PermissionError:
+        unreadable += 1
+    except OSError:
+        pass
+print(f"UNREADABLE\t{unreadable}")
+for h in holders:
+    print(f"HOLDER\t{h}")
+PY
+        return 0
+    fi
+
+    local mpath pid line rest path_col unreadable=0
+    local -a holders=()
+    for mpath in "$proc_root"/[0-9]*/maps; do
+        [ -e "$mpath" ] || continue
+        if [ ! -r "$mpath" ]; then
+            unreadable=$((unreadable + 1))
+            continue
+        fi
+        pid="${mpath%/*}"; pid="${pid##*/}"
+        while IFS= read -r line; do
+            case "$line" in
+                */*) ;;
+                *) continue ;;
+            esac
+            rest="${line#* * * * * }"
+            [ "$rest" != "$line" ] || continue
+            path_col="${rest#"${rest%%[![:space:]]*}"}"
+            path_col="${path_col% (deleted)}"
+            for t in "${targets[@]}"; do
+                if [ "$path_col" = "$t" ]; then
+                    holders+=("$pid -> $path_col")
+                    break
+                fi
+            done
+        done < "$mpath" 2>/dev/null || true
+    done
+    printf 'UNREADABLE\t%s\n' "$unreadable"
+    for t in "${holders[@]}"; do
+        printf 'HOLDER\t%s\n' "$t"
+    done
+}
+
+wait_for_unmapped_targets() {
+    local maps_timeout="${SLSM_STOP_STEAM_MAPS_TIMEOUT:-15}"
+    local poll="${SLSM_STOP_STEAM_POLL:-0.25}"
+    local start_ms deadline_ms now scan_out line unreadable noted_unreadable=0
+    local -a holders=()
+    local announced=0
+
+    start_ms="$(now_ms)"
+    deadline_ms=$(( start_ms + $(timeout_to_ms "$maps_timeout") ))
+
+    while true; do
+        scan_out="$(scan_mapped_targets)"
+        unreadable=0
+        holders=()
+        while IFS= read -r line; do
+            case "$line" in
+                UNREADABLE$'\t'*) unreadable="${line#UNREADABLE$'\t'}" ;;
+                HOLDER$'\t'*)     holders+=("${line#HOLDER$'\t'}") ;;
+            esac
+        done <<< "$scan_out"
+
+        if [ "$noted_unreadable" = 0 ] && [ "${unreadable:-0}" -gt 0 ]; then
+            dim "skipped $unreadable unreadable /proc/<pid>/maps entries"
+            noted_unreadable=1
+        fi
+
+        if [ "${#holders[@]}" -eq 0 ]; then
+            return 0
+        fi
+
+        now="$(now_ms)"
+        if [ "$now" -ge "$deadline_ms" ]; then
+            local h
+            for h in "${holders[@]}"; do
+                bad "still mapped: $h"
+            done
+            bad "refusing to modify files while processes still hold swap targets"
+            return 1
+        fi
+
+        if [ "$announced" = 0 ]; then
+            dim "waiting for processes releasing staged files to exit (timeout ${maps_timeout}s)..."
+            announced=1
+        fi
+        sleep "$poll"
+    done
+}
+
+cmd_stop_steam() {
+    local pid="" steam_root="" app_hit app_pid app_id
+    local stop_timeout="${SLSM_STOP_STEAM_TIMEOUT:-60}"
+    local kill_timeout="${SLSM_STOP_STEAM_KILL_TIMEOUT:-15}"
+    local poll="${SLSM_STOP_STEAM_POLL:-0.25}"
+    local start_ms deadline_ms next_note_ms now elapsed_s stopped=0
+
+    pid="$(read_steam_pid || true)"
+    if [ -n "$pid" ] && pid_alive "$pid"; then
+        if [ "${SLSM_STOP_STEAM:-}" != "force" ]; then
+            app_hit="$(find_active_steam_app "$pid")"
+            if [ -n "$app_hit" ]; then
+                app_pid="${app_hit%%$'\t'*}"
+                app_id="${app_hit#*$'\t'}"
+                bad "Steam app $app_id is running (pid $app_pid) — refusing to stop Steam"
+                dim "  Close the game first, or set SLSM_STOP_STEAM=force to shut Steam down anyway."
+                return 1
+            fi
+        else
+            warn "SLSM_STOP_STEAM=force: bypassing active-game check"
+        fi
+
+        steam_root="$(find_steam_root || true)"
+        if [ -n "$steam_root" ]; then
+            dim "shutting down Steam (pid $pid) via $steam_root/steam.sh -shutdown..."
+            (
+                cd "$steam_root" && \
+                env -u STEAM_FORCE_CLIENT -u LD_AUDIT -u LD_PRELOAD "$steam_root/steam.sh" -shutdown
+            ) >/dev/null 2>&1 || true
+        else
+            warn "steam.sh not found in Steam roots; falling back to SIGTERM for pid $pid"
+        fi
+
+        if [ -n "$steam_root" ]; then
+            dim "waiting for Steam (pid $pid) and children to exit (timeout ${stop_timeout}s)..."
+            start_ms="$(now_ms)"
+            deadline_ms=$(( start_ms + $(timeout_to_ms "$stop_timeout") ))
+            next_note_ms=$(( start_ms + 5000 ))
+            while true; do
+                if ! pid_alive "$pid"; then
+                    stopped=1
+                    ok "Steam stopped gracefully"
+                    break
+                fi
+                now="$(now_ms)"
+                if [ "$now" -ge "$deadline_ms" ]; then
+                    break
+                fi
+                if [ "$now" -ge "$next_note_ms" ]; then
+                    elapsed_s=$(( (now - start_ms) / 1000 ))
+                    dim "still waiting for Steam (pid $pid) to shut down (${elapsed_s}s)..."
+                    next_note_ms=$(( now + 5000 ))
+                fi
+                sleep "$poll"
+            done
+        fi
+
+        if [ "$stopped" = 0 ] && pid_alive "$pid"; then
+            warn "Steam (pid $pid) did not exit gracefully; sending SIGTERM (timeout ${kill_timeout}s)..."
+            kill -TERM "$pid" 2>/dev/null || true
+            start_ms="$(now_ms)"
+            deadline_ms=$(( start_ms + $(timeout_to_ms "$kill_timeout") ))
+            while true; do
+                if ! pid_alive "$pid"; then
+                    stopped=1
+                    ok "Steam stopped (SIGTERM)"
+                    break
+                fi
+                now="$(now_ms)"
+                if [ "$now" -ge "$deadline_ms" ]; then
+                    bad "Steam (pid $pid) did not exit after SIGTERM (${kill_timeout}s); close it manually and re-run"
+                    return 1
+                fi
+                sleep "$poll"
+            done
+        fi
+    else
+        ok "Steam is not running"
+    fi
+
+    wait_for_unmapped_targets
 }
 
 env_conf_value() {
@@ -246,7 +569,7 @@ cmd_on() {
     local env_absent="$MOON_DIR/steam-32bit.conf.absent"
     local stage_cr=0 stage_cr_cli=0
 
-    require_steam_stopped
+    cmd_stop_steam || exit 1
     require_file_cmd
     migrate_cr_backups
 
@@ -361,7 +684,7 @@ cmd_off() {
     local stage_sls=0 stage_cr=0 stage_cr_cli=0 stage_wrap=0
     local env_action="keep"
 
-    require_steam_stopped
+    cmd_stop_steam || exit 1
     require_file_cmd
     migrate_cr_backups
 
@@ -751,20 +1074,22 @@ usage() {
     cat <<EOF
 moon64 — 64-bit Steam client switcher for the Luna/LuaTools stack
 
-  moon64 on         activate the 64-bit steamrt64 client + 64-bit libraries
-  moon64 off        restore the 32-bit ubuntu12_32 stack
-  moon64 status     staged vs active components, and the selected client
-  moon64 doctor     check whether the 64-bit path can work, and why not
+  moon64 on          activate the 64-bit steamrt64 client + 64-bit libraries
+  moon64 off         restore the 32-bit ubuntu12_32 stack
+  moon64 stop-steam  gracefully quit a running Steam client and wait for file release
+  moon64 status      staged vs active components, and the selected client
+  moon64 doctor      check whether the 64-bit path can work, and why not
 
 install.sh stages everything; 'on' and 'off' only swap files already on disk.
 EOF
 }
 
 case "${1:-}" in
-    on)     cmd_on ;;
-    off)    cmd_off ;;
-    status) cmd_status ;;
-    doctor) cmd_doctor ;;
+    on)         cmd_on ;;
+    off)        cmd_off ;;
+    stop-steam) cmd_stop_steam ;;
+    status)     cmd_status ;;
+    doctor)     cmd_doctor ;;
     ''|-h|--help|help) usage ;;
     *) bad "unknown command: $1"; usage; exit 2 ;;
 esac
