@@ -848,6 +848,7 @@ fi
 # local build, which needs gcc. Without either the install still succeeds, but
 # the P2P cert patch is inactive.
 netsock64_src="$HERE/patches/netsock64/steamclient_audit64.c"
+netsock64_staged=0
 if [ -n "$NETSOCK64_PREBUILT" ]; then
     install -m 755 "$NETSOCK64_PREBUILT" "$MOON_DIR/netsock64.so" || die "cannot stage netsock64.so"
     cmp -s "$NETSOCK64_PREBUILT" "$MOON_DIR/netsock64.so" || die "staged netsock64.so differs from the verified download"
@@ -855,12 +856,14 @@ if [ -n "$NETSOCK64_PREBUILT" ]; then
         "url=$NETSOCK64_URL" "sha256_published=$NETSOCK64_SHA_PUBLISHED"
     drop_prebuilt_tmp
     netsock64_path="prebuilt ($NETSOCK64_URL)"
+    netsock64_staged=1
     ok "staged $MOON_DIR/netsock64.so: $netsock64_path"
 elif [ -f "$netsock64_src" ] && command -v gcc >/dev/null 2>&1; then
     gcc -O2 -Wall -Wextra -shared -fPIC \
         -o "$MOON_DIR/netsock64.so" "$netsock64_src" -ldl || die "netsock64 build failed"
     write_origin_state "$MOON_DIR/netsock64.so" "$MOON_DIR/netsock64.state" built "src=$netsock64_src"
     netsock64_path="built from $netsock64_src"
+    netsock64_staged=1
     ok "built $MOON_DIR/netsock64.so"
 else
     if [ -f "$netsock64_src" ]; then why="gcc is not installed to build it"; else why="this copy of moon64 has no patches/netsock64 to build it from"; fi
@@ -1028,6 +1031,10 @@ fi
 printf '\n'
 ok "staging complete; nothing has been activated"
 ok "SLSsteam.so.64: $sls64_path"
-ok "netsock64.so: $netsock64_path"
+if [ "$netsock64_staged" = 1 ]; then
+    ok "netsock64.so: $netsock64_path"
+else
+    warn "netsock64.so: $netsock64_path"
+fi
 dim "verify:  $MOON_DIR/moon64 doctor"
 dim "switch:  $MOON_DIR/moon64 on     (undo: $MOON_DIR/moon64 off)"

@@ -261,9 +261,35 @@ assert_same "c1: moon64 installed" "$REPO_ROOT/bin/moon64" "$MD/moon64"
 assert_same "c1: wrapper installed" "$REPO_ROOT/bin/wrapper.64.sh" "$MD/wrapper.64.sh"
 assert_contains "c1: hands over to the user" "next:  $MD/moon64 doctor" "$out"
 assert_contains "c1: activates nothing" "nothing is active yet" "$out"
+assert_contains "c1: close: cert patch active, from the release" $'nothing is active yet.\nP2P cert patch: active once you run moon64 on (netsock64.so from the release)\n' "$out"
+assert_not_contains "c1: close: not inactive" "P2P cert patch: INACTIVE" "$out"
 assert_absent "c1: no desktop override" "$sb/home/.local/share/applications/steam.desktop"
 assert_absent "c1: no sudo" "$sb/sudo.log"
 assert_eq "c1: temporary files removed" "" "$(ls -A "$sb/tmp")"
+cert_line_active="$(sed -n '/^P2P cert patch:/p' <<< "$out")"
+
+# --- (c2/c3) tampered netsock64.so & missing netsock64.state fail closed ---
+printf '\0' >> "$MD/netsock64.so"
+out_changed="$(GETSH_RELEASE="$REL_ABSENT" pipe_get "$sb" 2>&1)"; rc=$?
+assert_rc "c2: re-run without gcc after netsock64.so change exits 0" 0 "$rc" "$out_changed"
+assert_contains "c2: close: UNVERIFIED when sha256 mismatches" "P2P cert patch: UNVERIFIED - netsock64.so changed since install.sh recorded it; re-run the installer to restage it." "$out_changed"
+assert_contains "c2: close: warns P2P joins will fail" "co-op joins that need peer-to-peer will fail if that file is not the cert patch." "$out_changed"
+assert_not_contains "c2: close: never claims active on mismatch" "P2P cert patch: active" "$out_changed"
+cert_line_changed="$(sed -n '/^P2P cert patch:/p' <<< "$out_changed")"
+
+rm -f "$MD/netsock64.state"
+out_nostate="$(GETSH_RELEASE="$REL_ABSENT" pipe_get "$sb" 2>&1)"; rc=$?
+assert_rc "c3: re-run without gcc after deleting netsock64.state exits 0" 0 "$rc" "$out_nostate"
+assert_contains "c3: close: UNVERIFIED when state missing" "P2P cert patch: UNVERIFIED - no install record for netsock64.so; re-run the installer to verify it." "$out_nostate"
+assert_contains "c3: close: warns P2P joins will fail" "co-op joins that need peer-to-peer will fail if that file is not the cert patch." "$out_nostate"
+assert_not_contains "c3: close: never claims active without state" "P2P cert patch: active" "$out_nostate"
+cert_line_nostate="$(sed -n '/^P2P cert patch:/p' <<< "$out_nostate")"
+
+printf 'source=built\n' > "$MD/netsock64.state"
+out_nosha="$(GETSH_RELEASE="$REL_ABSENT" pipe_get "$sb" 2>&1)"; rc=$?
+assert_rc "c4: re-run without gcc when state lacks sha256 exits 0" 0 "$rc" "$out_nosha"
+assert_contains "c4: close: UNVERIFIED when state has no sha256" "P2P cert patch: UNVERIFIED - no install record for netsock64.so; re-run the installer to verify it." "$out_nosha"
+assert_not_contains "c4: close: never claims active without sha256" "P2P cert patch: active" "$out_nosha"
 
 # --- (d) MOON64_REF, MOON64_DIR and SLSM_PREBUILT_URL are respected -----------
 sb="$(make_sandbox d)"
@@ -356,6 +382,7 @@ assert_contains "h1: from get.sh's temporary copy" "netsock64.so: built from $sb
 assert_eq "h1: a 64-bit shared object" "ELF 64-bit LSB shared object, x86-64" "$(file -b "$MD/netsock64.so" 2>/dev/null | cut -d, -f1-2)"
 assert_contains "h1: recorded as built" "source=built" "$(cat "$MD/netsock64.state" 2>/dev/null)"
 assert_not_contains "h1: no degraded warning" "the P2P cert patch will be inactive" "$out"
+assert_contains "h1: close: cert patch active, built from source" "P2P cert patch: active once you run moon64 on (netsock64.so built from source)" "$out"
 assert_same "h1: SLSsteam.so.64 is the release's" "$REL_ABSENT/SLSsteam.so" "$MD/SLSsteam.so.64"
 
 sb="$(make_sandbox h2)"
@@ -366,8 +393,15 @@ assert_contains "h2: warns loudly" "the release has no netsock64.so and gcc is n
 assert_contains "h2: degraded, not failed" "this is a degraded feature, not a failed install" "$out"
 assert_contains "h2: summary" "netsock64.so: none (the P2P cert patch is inactive)" "$out"
 assert_contains "h2: get.sh reports success" "nothing is active yet" "$out"
+assert_contains "h2: close: cert patch inactive, and what gcc or a release would give" $'nothing is active yet.\nP2P cert patch: INACTIVE - co-op joins that need peer-to-peer (Satisfactory, REPO) will fail.\n                install gcc and run this again to build it, or wait for a release that ships netsock64.so.\n' "$out"
+assert_not_contains "h2: close: never claims the patch is active" "P2P cert patch: active" "$out"
 assert_absent "h2: no netsock64.so" "$MD/netsock64.so"
 assert_same "h2: SLSsteam.so.64 is the release's" "$REL_ABSENT/SLSsteam.so" "$MD/SLSsteam.so.64"
+cert_line_inactive="$(sed -n '/^P2P cert patch:/p' <<< "$out")"
+distinct_cert_lines="$(printf '%s\n%s\n%s\n%s\n' \
+    "$cert_line_inactive" "$cert_line_active" "$cert_line_changed" "$cert_line_nostate" \
+    | sort -u | wc -l)"
+assert_eq "h2: all 4 cert-patch states emit distinct lines" "4" "$distinct_cert_lines"
 
 # --- (i) through the pipe, a release whose pattern-status.txt names a
 # netsock64.so that is not there: a hard refusal, nothing staged ---------------

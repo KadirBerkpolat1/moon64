@@ -77,6 +77,46 @@ get_cleanup() {
     [ -z "$GET_TMP" ] || rm -rf "$GET_TMP"
 }
 
+# get_cert_patch <moon dir> - one or two lines on the P2P cert patch, from the
+# netsock64.so the wrapper will put on LD_AUDIT and install.sh's record of it.
+get_cert_patch() {
+    local so="$1/netsock64.so" state="$1/netsock64.state" key val src="" sha="" got=""
+    if [ ! -f "$so" ]; then
+        printf 'P2P cert patch: INACTIVE - co-op joins that need peer-to-peer (Satisfactory, REPO) will fail.\n'
+        printf '                install gcc and run this again to build it, or wait for a release that ships netsock64.so.\n'
+        return 0
+    fi
+    if [ -f "$state" ]; then
+        while IFS='=' read -r key val; do
+            case "$key" in
+                source) src="$val" ;;
+                sha256) sha="$val" ;;
+            esac
+        done < "$state"
+    fi
+    if [ -n "$sha" ]; then
+        got="$(sha256sum "$so" 2>/dev/null | cut -d' ' -f1)"
+        if [ -n "$got" ] && [ "$sha" = "$got" ]; then
+            case "$src" in
+                prebuilt)
+                    printf 'P2P cert patch: active once you run moon64 on (netsock64.so from the release)\n'
+                    return 0
+                    ;;
+                built)
+                    printf 'P2P cert patch: active once you run moon64 on (netsock64.so built from source)\n'
+                    return 0
+                    ;;
+            esac
+        else
+            printf 'P2P cert patch: UNVERIFIED - netsock64.so changed since install.sh recorded it; re-run the installer to restage it.\n'
+            printf '                co-op joins that need peer-to-peer will fail if that file is not the cert patch.\n'
+            return 0
+        fi
+    fi
+    printf 'P2P cert patch: UNVERIFIED - no install record for netsock64.so; re-run the installer to verify it.\n'
+    printf '                co-op joins that need peer-to-peer will fail if that file is not the cert patch.\n'
+}
+
 main() {
     set -uo pipefail
     local dry_run=0 arg ref base moon_dir f url rc log entry rerun=""
@@ -165,6 +205,7 @@ main() {
     if [ "$rc" -eq 0 ]; then
         GET_INSTALLING=0
         printf '\nmoon64 is staged in %s from %s; nothing is active yet.\n' "$moon_dir" "$base"
+        get_cert_patch "$moon_dir"
         printf 'next:  %s/moon64 doctor\n' "$moon_dir"
         printf '       %s/moon64 on      (with Steam closed; undo: %s/moon64 off)\n' "$moon_dir" "$moon_dir"
         return 0

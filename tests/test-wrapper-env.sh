@@ -124,5 +124,37 @@ dump1="$(cat "$DUMP_FILE")"
 assert_eq "case3 WINEDLLOVERRIDES stays set when empty" "SET" "$(val_of WINEDLLOVERRIDES_SET)"
 assert_eq "case3 WINEDLLOVERRIDES value stays empty" "" "$(val_of WINEDLLOVERRIDES)"
 
+# Case 4: netsock64.state sha256 mismatch skips netsock64.so and logs plainly
+rm -f "$DUMP_FILE"
+printf 'source=prebuilt\nsha256=%064d\n' 0 > "$FAKE_MOON/netsock64.state"
+err4="$(env -i \
+    PATH="$FAKE_BIN:/usr/bin:/bin" \
+    HOME="$FAKE_HOME" \
+    MOON64_DIR="$FAKE_MOON" \
+    bash "$REPO_ROOT/bin/wrapper.64.sh" 2>&1)"; rc4=$?
+dump1="$(cat "$DUMP_FILE")"
+assert_eq "case4 wrapper exits 0 when SLSsteam.so is valid" "0" "$rc4"
+assert_eq "case4 LD_AUDIT skips mismatched netsock64.so" "$SLS_DIR/SLSsteam.so" "$(val_of LD_AUDIT)"
+case "$err4" in
+    *"P2P cert patch skipped"*) pass "case4 stderr explains cert patch skipped"; PASS=$((PASS + 0)) ;;
+    *) fail "case4 stderr explains cert patch skipped" "got: $err4" ;;
+esac
+
+# Case 5: SLSM_ALLOW_UNVERIFIED_NETSOCK=1 loads despite sha256 mismatch
+rm -f "$DUMP_FILE"
+err5="$(env -i \
+    PATH="$FAKE_BIN:/usr/bin:/bin" \
+    HOME="$FAKE_HOME" \
+    MOON64_DIR="$FAKE_MOON" \
+    SLSM_ALLOW_UNVERIFIED_NETSOCK=1 \
+    bash "$REPO_ROOT/bin/wrapper.64.sh" 2>&1)"; rc5=$?
+dump1="$(cat "$DUMP_FILE")"
+assert_eq "case5 wrapper exits 0 with override" "0" "$rc5"
+assert_eq "case5 LD_AUDIT includes netsock64.so with override" "$FAKE_MOON/netsock64.so:$SLS_DIR/SLSsteam.so" "$(val_of LD_AUDIT)"
+case "$err5" in
+    *"SLSM_ALLOW_UNVERIFIED_NETSOCK=1"*) pass "case5 stderr warns on override" ;;
+    *) fail "case5 stderr warns on override" "got: $err5" ;;
+esac
+
 printf 'Summary: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

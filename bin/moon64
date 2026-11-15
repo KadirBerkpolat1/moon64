@@ -957,6 +957,20 @@ cmd_on() {
 
     [ -f "$MOON_DIR/SLSsteam.so.64" ] || die "$MOON_DIR/SLSsteam.so.64 missing — run install.sh first"
     [ -f "$MOON_DIR/wrapper.64.sh" ] || die "$MOON_DIR/wrapper.64.sh missing — run install.sh"
+    if [ -f "$MOON_DIR/netsock64.so" ]; then
+        case "$(netsock64_state_check)" in
+            mismatch)
+                if [ "${SLSM_ALLOW_UNVERIFIED_NETSOCK:-0}" = 1 ]; then
+                    warn "SLSM_ALLOW_UNVERIFIED_NETSOCK=1: activating with unverified $MOON_DIR/netsock64.so (sha256 mismatch against $MOON_DIR/netsock64.state)"
+                else
+                    die "refusing to activate: $MOON_DIR/netsock64.so changed since install.sh recorded it in $MOON_DIR/netsock64.state (re-run install.sh to restage it, or set SLSM_ALLOW_UNVERIFIED_NETSOCK=1 to override)"
+                fi
+                ;;
+            unrecorded)
+                warn "$MOON_DIR/netsock64.so has no sha256 record in $MOON_DIR/netsock64.state — re-run install.sh to verify it"
+                ;;
+        esac
+    fi
 
     # --- Phase 1: stage & verify under $MOON_DIR/staged/ -------------------
     tx_begin_stage
@@ -1595,6 +1609,26 @@ netsock64_origin() {
     printf '%s' "$origin"
 }
 
+# netsock64_state_check — verify $MOON_DIR/netsock64.so against $MOON_DIR/netsock64.state.
+# Prints: missing | unrecorded | ok | mismatch.
+netsock64_state_check() {
+    local f="$MOON_DIR/netsock64.so" state="$MOON_DIR/netsock64.state"
+    local key val want="" got=""
+    [ -f "$f" ] || { printf 'missing'; return 0; }
+    if [ -f "$state" ]; then
+        while IFS='=' read -r key val; do
+            [ "$key" = "sha256" ] && want="$val"
+        done < "$state"
+    fi
+    [ -n "$want" ] || { printf 'unrecorded'; return 0; }
+    got="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+    if [ -n "$got" ] && [ "$got" = "$want" ]; then
+        printf 'ok'
+    else
+        printf 'mismatch'
+    fi
+}
+
 # check_rollback_target <active SLSsteam bits> — report what `off` would restore
 # and where it came from. Returns 1 when the saved .32 is not 32-bit.
 check_rollback_target() {
@@ -1705,7 +1739,18 @@ cmd_doctor() {
     fi
 
     if [ -f "$MOON_DIR/netsock64.so" ]; then
-        ok "netsock64.so present ($(netsock64_origin))"
+        case "$(netsock64_state_check)" in
+            ok)
+                ok "netsock64.so present ($(netsock64_origin))"
+                ;;
+            mismatch)
+                bad "netsock64.so changed since install.sh recorded it in $MOON_DIR/netsock64.state — 'moon64 on' will refuse it and the wrapper will skip it; re-run install.sh"
+                problems=$((problems+1))
+                ;;
+            unrecorded)
+                warn "netsock64.so present ($(netsock64_origin); no sha256 record — re-run install.sh to verify it)"
+                ;;
+        esac
     else
         warn "netsock64.so missing — the P2P cert patch would not be applied"
     fi
