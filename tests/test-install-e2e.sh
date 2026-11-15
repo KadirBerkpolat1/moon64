@@ -279,6 +279,10 @@ assert_eq "5: on+off left HOME as install.sh did, plus the inert SLSsteam.so" \
 out="$(run bash "$sb/moon64/moon64" doctor 2>&1)"; rc=$?
 assert_rc "5: doctor after off finds no blocking problem" 0 "$rc" "$out"
 assert_contains "5: doctor offers on again" "'moon64 on' points it at $SLS/path/steam" "$out"
+assert_contains "5: doctor calls the .32 the intentional rollback target" \
+    "intentional: install.sh provisioned it so 'moon64 off' always has a 32-bit stack to restore" "$out"
+assert_contains "5: doctor says the restored SLSsteam.so is not a leftover" \
+    "the active SLSsteam.so is this rollback target, restored by 'moon64 off'; neither file is a leftover" "$out"
 
 # --- 6. a second on/off cycle lands in the same places --------------------
 out="$(run bash "$sb/moon64/moon64" on 2>&1)"; rc=$?

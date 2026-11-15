@@ -1601,6 +1601,10 @@ check_rollback_target() {
     got="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
     if [ -n "$want" ] && [ "$got" = "$want" ]; then
         ok "$f: upstream SLSsteam $ver, fetched by install.sh (sha256 $got)"
+        dim "  intentional: install.sh provisioned it so 'moon64 off' always has a 32-bit stack to restore; keep it"
+        if [ "$active" = 32 ] && cmp -s "$SLS_DIR/SLSsteam.so" "$f"; then
+            dim "  the active SLSsteam.so is this rollback target, restored by 'moon64 off'; neither file is a leftover"
+        fi
     else
         warn "$f no longer matches the upstream download recorded in $state"
     fi

@@ -291,5 +291,7 @@ is still moon64's), and puts the Steam client switches
 (`.steam-enable/disable-steamrt64-client`) back as `on` found them instead of
 forcing the 32-bit client. The restored `SLSsteam.so` is left in place, but
 nothing loads it, so Steam starts without SLSsteam until you set up upstream's
-launcher. `tests/test-install-e2e.sh` checks that the whole home directory then
-differs from the freshly installed state only by that file.
+launcher. It and `SLSsteam.so.32` stay on purpose: the `.32` is the verified
+upstream download `install.sh` provisioned for `off` to restore, not a leftover,
+and `moon64 doctor` says so. `tests/test-install-e2e.sh` checks that the whole
+home directory then differs from the freshly installed state only by that file.
