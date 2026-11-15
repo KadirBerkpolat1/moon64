@@ -37,12 +37,13 @@ bad()  { printf '%s fail %s %s\n' "$c_red" "$c_nc" "$*"; }
 dim()  { printf '%s      %s%s\n' "$c_dim" "$*" "$c_nc"; }
 die()  { bad "$*"; exit 1; }
 
-# is_uint <val> — true for non-empty unsigned decimal integers.
+# is_uint <val> — true for 1-9 digit unsigned decimal integers (blocks 64-bit arithmetic wrap).
 is_uint() {
-    case "${1:-}" in
+    local val="${1:-}"
+    case "$val" in
         ''|*[!0-9]*) return 1 ;;
-        *) return 0 ;;
     esac
+    [ "${#val}" -le 9 ]
 }
 
 # check_pattern_gate <src_dir> — fail-closed gate on res/pattern-status.txt.
@@ -81,6 +82,8 @@ check_pattern_gate() {
             reason="arch must be x86_64 (got: ${arch:-<missing>})"
         elif [ "$seen_required" -ne 1 ] || ! is_uint "$required"; then
             reason="required must be present and numeric (got: ${required:-<missing>})"
+        elif [ "$((10#$required))" -lt 1 ]; then
+            reason="required must be >= 1 (got: $required)"
         elif [ "$seen_resolved" -ne 1 ] || ! is_uint "$resolved"; then
             reason="resolved must be present and numeric (got: ${resolved:-<missing>})"
         elif [ "$seen_pending" -ne 1 ] || ! is_uint "$pending"; then

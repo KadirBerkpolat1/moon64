@@ -90,6 +90,14 @@ run_gate_case "pending non-numeric" 1 0 \
 $'arch=x86_64\nrequired=38\nresolved=38\npending=zero\nrunipcframe_tail=ready' \
 "pending must be present and numeric"
 
+run_gate_case "pending 2^64 overflow rejected" 1 0 \
+$'arch=x86_64\nrequired=38\nresolved=38\npending=18446744073709551616\nrunipcframe_tail=ready' \
+"pending must be present and numeric"
+
+run_gate_case "required=0 rejected" 1 0 \
+$'arch=x86_64\nrequired=0\nresolved=0\npending=0\nrunipcframe_tail=ready' \
+"required must be >= 1"
+
 # 4. resolved + pending != required -> refuse
 run_gate_case "resolved+pending != required" 1 0 \
 $'arch=x86_64\nrequired=38\nresolved=37\npending=0\nrunipcframe_tail=ready' \
