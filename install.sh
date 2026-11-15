@@ -136,9 +136,8 @@ command -v file    >/dev/null || die "file is required"
 command -v readelf >/dev/null || die "readelf (binutils) is required"
 command -v ldd     >/dev/null || die "ldd is required"
 
-if [ -f "$HOME/.steam/steam.pid" ] && kill -0 "$(cat "$HOME/.steam/steam.pid" 2>/dev/null)" 2>/dev/null; then
-    die "Steam is running. Close it completely, then re-run."
-fi
+[ -f "$HERE/bin/moon64" ] || die "bin/moon64 missing from the checkout"
+bash "$HERE/bin/moon64" stop-steam || die "cannot stop running Steam; close it manually and re-run"
 
 mkdir -p "$MOON_DIR" || die "cannot create $MOON_DIR"
 
