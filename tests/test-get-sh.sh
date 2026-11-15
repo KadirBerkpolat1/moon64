@@ -117,8 +117,11 @@ done
 rm -f "$RAW/broken/bin/wrapper.64.sh"
 
 STATUS=$'arch=x86_64\nrequired=38\nresolved=38\npending=0\nrunipcframe_tail=ready'
-# make_release <name> [mismatch] — a complete release: both libraries, their
-# .sha256 files and a pattern-status.txt binding both.
+# make_release <name> [variant] — a complete release: both libraries, their
+# .sha256 files and a pattern-status.txt binding both. Variants: mismatch
+# (netsock64 bound to the wrong digest), absent (no netsock64.so, no .sha256,
+# no binding line: what v1.0.0 publishes), bound-missing (the binding line,
+# but no netsock64.so or .sha256).
 make_release() {
     local d="$TMP_ROOT/rel-$1" ns
     mkdir -p "$d"
@@ -126,14 +129,20 @@ make_release() {
     make_so "netsock_$1" "$d/netsock64.so"
     printf '%s  SLSsteam.so\n' "$(sha "$d/SLSsteam.so")" > "$d/SLSsteam.so.sha256"
     printf '%s  netsock64.so\n' "$(sha "$d/netsock64.so")" > "$d/netsock64.so.sha256"
-    ns="$(sha "$d/netsock64.so")"
-    [ "${2:-}" != mismatch ] || ns="$(sha "$d/SLSsteam.so")"
-    printf '%s\nbinary_sha256=%s\nnetsock64_sha256=%s\n' "$STATUS" "$(sha "$d/SLSsteam.so")" "$ns" > "$d/pattern-status.txt"
+    ns="netsock64_sha256=$(sha "$d/netsock64.so")"$'\n'
+    case "${2:-}" in
+        mismatch) ns="netsock64_sha256=$(sha "$d/SLSsteam.so")"$'\n' ;;
+        absent) ns="" ;;
+    esac
+    printf '%s\nbinary_sha256=%s\n%s' "$STATUS" "$(sha "$d/SLSsteam.so")" "$ns" > "$d/pattern-status.txt"
+    case "${2:-}" in absent|bound-missing) rm -f "$d/netsock64.so" "$d/netsock64.so.sha256" ;; esac
     printf '%s' "$d"
 }
 REL="$(make_release default)"
 REL_OTHER="$(make_release other)"
 REL_BAD="$(make_release bad mismatch)"
+REL_ABSENT="$(make_release absent absent)"
+REL_BOUND_MISSING="$(make_release bound_missing bound-missing)"
 
 REAL_CURL="$(command -v curl)"
 STUB="$TMP_ROOT/stub-bin"
@@ -179,22 +188,24 @@ make_sandbox() {
     printf '%s' "$sb"
 }
 
-# pipe_get <sb> [args...] — run get.sh as `curl ... | bash -s -- args` would, from
-# an unrelated directory, with only $GETSH_ENV (extra NAME=value words) added.
+# pipe_get <sb> [args...] — run get.sh the way `curl ... | bash -s -- args` does:
+# its text arrives on bash's stdin through a pipe, from an unrelated directory,
+# with only $GETSH_ENV (extra NAME=value words) added. GETSH_RELEASE picks the
+# release the latest/download URLs serve (default $REL).
 GETSH_ENV=()
 pipe_get() {
     local sb="$1" h="$1/home"
     shift
     : > "$sb/curl.log"
-    ( cd "$sb/cwd" && env -i \
+    cat "$REPO_ROOT/get.sh" | ( cd "$sb/cwd" && env -i \
         PATH="$STUB:${GETSH_PATH:-$NOCC}" HOME="$h" USER="${USER:-user}" TERM=dumb \
         TMPDIR="$sb/tmp" XDG_CONFIG_HOME="$h/.config" XDG_DATA_HOME="$h/.local/share" \
         XDG_DATA_DIRS="$sb/none" SLSM_PROC_ROOT="$sb/proc" LUMEN_FIX_INSTALLS_DIR="$sb/none" \
         SLSM_PKG_MANAGER=pacman SLSM_SLS32_URL="${GETSH_SLS32_URL:-file://$sb/no-rollback-download.7z}" \
         GETSH_CURL_LOG="$sb/curl.log" GETSH_SUDO_LOG="$sb/sudo.log" GETSH_RAW="$RAW" \
-        GETSH_REL="$REL" GETSH_REAL_CURL="$REAL_CURL" \
+        GETSH_REL="${GETSH_RELEASE:-$REL}" GETSH_REAL_CURL="$REAL_CURL" \
         "${GETSH_ENV[@]}" \
-        bash -s -- "$@" < "$REPO_ROOT/get.sh" )
+        bash -s -- "$@" )
 }
 
 raw_urls() { grep '^https://raw.githubusercontent.com/' "$1/curl.log" 2>/dev/null; }
@@ -226,7 +237,7 @@ sb="$(make_sandbox b)"
 before="$(snapshot "$sb")"
 out="$(pipe_get "$sb" --dry-run 2>&1)"; rc=$?
 assert_rc "b1: --dry-run exits 0" 0 "$rc" "$out"
-assert_contains "b1: prints the four URLs" "$(expected_raw main | sed 's/^/  /')" "$out"
+assert_contains "b1: prints the five URLs" "$(expected_raw main | sed 's/^/  /')" "$out"
 assert_contains "b1: prints the installer command" "would run:  install.sh --prebuilt" "$out"
 assert_contains "b1: prints the target" "staged into: $sb/home/.local/share/moon64" "$out"
 assert_eq "b1: curl never ran" "" "$(cat "$sb/curl.log")"
@@ -329,6 +340,47 @@ out="$(pipe_get "$sb" 2>&1)"; rc=$?
 GETSH_ENV=()
 assert_rc "f4: fails" 1 "$rc" "$out"
 assert_eq "f4: the existing SLSsteam directory is untouched" "$before" "$(snapshot "$sb/home/.local/share/SLSsteam")"
+
+# --- (h) through the pipe, a release without netsock64.so and without a binding
+# line (what v1.0.0 publishes): built from the fetched source with gcc, a loud
+# but successful degraded install without it ---------------------------------
+REL_URL="https://github.com/KadirBerkpolat1/slsteam-moon-64/releases/latest/download"
+sb="$(make_sandbox h1)"
+MD="$sb/home/.local/share/moon64"
+out="$(GETSH_RELEASE="$REL_ABSENT" GETSH_PATH="$PATH" pipe_get "$sb" 2>&1)"; rc=$?
+assert_rc "h1: with gcc the install succeeds" 0 "$rc" "$out"
+assert_contains "h1: fetched the cert patch source" "https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/patches/netsock64/steamclient_audit64.c" "$(raw_urls "$sb")"
+assert_contains "h1: says the release has none" "the release has no $REL_URL/netsock64.so and its pattern-status.txt names none" "$out"
+assert_contains "h1: builds it from the fetched source" "/patches/netsock64/steamclient_audit64.c" "$(grep -F 'netsock64.so: built from ' <<< "$out")"
+assert_contains "h1: from get.sh's temporary copy" "netsock64.so: built from $sb/tmp/moon64-get." "$out"
+assert_eq "h1: a 64-bit shared object" "ELF 64-bit LSB shared object, x86-64" "$(file -b "$MD/netsock64.so" 2>/dev/null | cut -d, -f1-2)"
+assert_contains "h1: recorded as built" "source=built" "$(cat "$MD/netsock64.state" 2>/dev/null)"
+assert_not_contains "h1: no degraded warning" "the P2P cert patch will be inactive" "$out"
+assert_same "h1: SLSsteam.so.64 is the release's" "$REL_ABSENT/SLSsteam.so" "$MD/SLSsteam.so.64"
+
+sb="$(make_sandbox h2)"
+MD="$sb/home/.local/share/moon64"
+out="$(GETSH_RELEASE="$REL_ABSENT" pipe_get "$sb" 2>&1)"; rc=$?
+assert_rc "h2: without gcc the install still succeeds" 0 "$rc" "$out"
+assert_contains "h2: warns loudly" "the release has no netsock64.so and gcc is not installed to build it: the P2P cert patch will be inactive" "$out"
+assert_contains "h2: degraded, not failed" "this is a degraded feature, not a failed install" "$out"
+assert_contains "h2: summary" "netsock64.so: none (the P2P cert patch is inactive)" "$out"
+assert_contains "h2: get.sh reports success" "nothing is active yet" "$out"
+assert_absent "h2: no netsock64.so" "$MD/netsock64.so"
+assert_same "h2: SLSsteam.so.64 is the release's" "$REL_ABSENT/SLSsteam.so" "$MD/SLSsteam.so.64"
+
+# --- (i) through the pipe, a release whose pattern-status.txt names a
+# netsock64.so that is not there: a hard refusal, nothing staged ---------------
+sb="$(make_sandbox i1 clean)"
+out="$(GETSH_RELEASE="$REL_BOUND_MISSING" GETSH_PATH="$PATH" pipe_get "$sb" 2>&1)"; rc=$?
+assert_rc "i1: refused even with gcc present" 1 "$rc" "$out"
+assert_contains "i1: says why" "$REL_URL/pattern-status.txt names a netsock64.so (netsock64_sha256=), but $REL_URL/netsock64.so cannot be downloaded" "$out"
+assert_contains "i1: refuses" "refusing to stage an unverified prebuilt netsock64.so; nothing was staged" "$out"
+assert_not_contains "i1: does not claim the release lacks it" "the release has no" "$out"
+assert_not_contains "i1: does not build a substitute" "netsock64.so: built from" "$out"
+assert_absent "i1: no moon64 directory" "$sb/home/.local/share/moon64"
+assert_absent "i1: no SLSsteam directory" "$sb/home/.local/share/SLSsteam"
+assert_eq "i1: temporary files removed" "" "$(ls -A "$sb/tmp")"
 
 # --- (g) missing prerequisites: listed, with the re-run command; no sudo ------
 sb="$(make_sandbox g)"
