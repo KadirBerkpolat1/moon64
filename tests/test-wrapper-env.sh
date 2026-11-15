@@ -21,6 +21,16 @@ assert_eq() {
     fi
 }
 
+pass() {
+    printf 'PASS [%s]\n' "$1"
+    PASS=$((PASS + 1))
+}
+
+fail() {
+    printf 'FAIL [%s]: %s\n' "$1" "$2" >&2
+    FAIL=$((FAIL + 1))
+}
+
 FAKE_HOME="$TMP_ROOT/home"
 FAKE_MOON="$TMP_ROOT/moon64"
 FAKE_BIN="$TMP_ROOT/bin"
