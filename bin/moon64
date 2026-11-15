@@ -576,6 +576,37 @@ disable_64bit_client() {
     done
 }
 
+# record_client_markers <file> / restore_client_markers <file> — keep which
+# client switches each Steam root had, so `off` can put a machine that had no
+# SLSsteam launcher back exactly as `on` found it.
+record_client_markers() {
+    local r en dis
+    for r in "${STEAM_ROOTS[@]}"; do
+        [ -d "$r" ] || continue
+        en=0; dis=0
+        [ -e "$r/.steam-enable-steamrt64-client" ] && en=1
+        [ -e "$r/.steam-disable-steamrt64-client" ] && dis=1
+        printf '%s\t%s\t%s\n' "$r" "$en" "$dis"
+    done > "$1.tmp" && mv -f "$1.tmp" "$1"
+}
+
+restore_client_markers() {
+    local r en dis
+    while IFS=$'\t' read -r r en dis; do
+        [ -d "$r" ] || continue
+        if [ "$en" = 1 ]; then
+            : > "$r/.steam-enable-steamrt64-client" || return 1
+        else
+            rm -f "$r/.steam-enable-steamrt64-client" || return 1
+        fi
+        if [ "$dis" = 1 ]; then
+            : > "$r/.steam-disable-steamrt64-client" || return 1
+        else
+            rm -f "$r/.steam-disable-steamrt64-client" || return 1
+        fi
+    done < "$1"
+}
+
 # --- Steam desktop entry ---------------------------------------------------
 # A normal Steam launch goes through the desktop entry, so `on` points every
 # Exec= of the Steam entries at the SLSsteam wrapper and `off` puts them back.
@@ -874,6 +905,7 @@ save_original_lib() {
 cmd_on() {
     local wrapper="$SLS_DIR/path/steam"
     local wrapper_bak="$MOON_DIR/wrapper.32.bak"
+    local wrapper_absent="$MOON_DIR/wrapper.absent" markers_pre="$MOON_DIR/client-markers.pre-on"
     local env_saved="$MOON_DIR/steam-32bit.conf.32"
     local env_absent="$MOON_DIR/steam-32bit.conf.absent"
     local stage_cr=0 stage_cr_cli=0 dt_dst dt_src k dt_ours=0
@@ -938,6 +970,9 @@ CONF
     fi
     if [ -f "$wrapper" ] && [ ! -f "$wrapper_bak" ] && ! cmp -s "$wrapper" "$MOON_DIR/wrapper.64.sh"; then
         atomic_copy_preserve "$wrapper" "$wrapper_bak" || die "cannot back up $wrapper"
+    elif [ ! -e "$wrapper" ] && [ ! -f "$wrapper_bak" ] && [ ! -f "$wrapper_absent" ]; then
+        record_client_markers "$markers_pre" || die "cannot record the Steam client switches"
+        : > "$wrapper_absent" || die "cannot mark $wrapper absent"
     fi
     if [ -f "$ENV_CONF" ]; then
         if [ ! -f "$env_saved" ] && [ ! -f "$env_absent" ] && [ "$(env_conf_value)" != "steamrt64" ]; then
@@ -1037,6 +1072,8 @@ CONF
 cmd_off() {
     local wrapper="$SLS_DIR/path/steam"
     local wrapper_bak="$MOON_DIR/wrapper.32.bak"
+    local wrapper_absent="$MOON_DIR/wrapper.absent" markers_pre="$MOON_DIR/client-markers.pre-on"
+    local wrap_action="keep"
     local env_saved="$MOON_DIR/steam-32bit.conf.32"
     local env_absent="$MOON_DIR/steam-32bit.conf.absent"
     local stage_sls=0 stage_cr=0 stage_cr_cli=0 stage_wrap=0
@@ -1079,6 +1116,16 @@ cmd_off() {
         cp -a "$wrapper_bak" "$STAGE_DIR/wrapper" || die "cannot stage 32-bit wrapper"
         cmp -s "$STAGE_DIR/wrapper" "$wrapper_bak" || die "staged wrapper byte mismatch"
         stage_wrap=1
+    elif [ -f "$wrapper_absent" ]; then
+        # There was no launcher before `on`. Remove only the wrapper `on`
+        # installed; anything put there since is someone else's.
+        if [ ! -e "$wrapper" ]; then
+            wrap_action=gone
+        elif cmp -s "$wrapper" "$MOON_DIR/wrapper.64.sh"; then
+            wrap_action=remove
+        else
+            wrap_action=foreign
+        fi
     fi
 
     if [ -f "$env_saved" ]; then
@@ -1142,6 +1189,8 @@ CONF
     if [ "$stage_wrap" = 1 ]; then
         atomic_copy_preserve "$STAGE_DIR/wrapper" "$wrapper" || die "cannot restore wrapper"
         cmp -s "$wrapper" "$wrapper_bak" || die "wrapper byte-exact check failed"
+    elif [ "$wrap_action" = remove ]; then
+        rm -f "$wrapper" || die "cannot remove $wrapper"
     fi
     case "$env_action" in
         restore)
@@ -1170,11 +1219,18 @@ CONF
         esac
     done
 
-    disable_64bit_client || die "cannot restore 32-bit client markers"
+    if [ "$wrap_action" = remove ] || [ "$wrap_action" = gone ]; then
+        if [ -f "$markers_pre" ]; then
+            restore_client_markers "$markers_pre" || die "cannot restore the Steam client switches"
+        fi
+    else
+        disable_64bit_client || die "cannot restore 32-bit client markers"
+    fi
     tx_commit_done
     for k in "${!dr_user[@]}"; do
         rm -f "${dr_user[k]}.moon64-bak" "${dr_user[k]}.moon64-created"
     done
+    [ "$wrap_action" = remove ] && rmdir "${wrapper%/*}" 2>/dev/null
 
     if [ "$stage_sls" = 1 ]; then
         ok "SLSsteam.so: 32-bit restored (byte-exact)"
@@ -1186,11 +1242,13 @@ CONF
     elif [ "$(elfbits "$CR_DIR/cloud_redirect.so")" = 64 ]; then
         warn "cloud_redirect.so is 64-bit with no .32 backup; rebuild/reinstall 32-bit CloudRedirect"
     fi
-    if [ "$stage_wrap" = 1 ]; then
-        ok "wrapper: $wrapper (restored byte-exact to 32-bit stack)"
-    else
-        warn "no saved 32-bit wrapper at $wrapper_bak; launcher left as is"
-    fi
+    case "$stage_wrap:$wrap_action" in
+        1:*)        ok "wrapper: $wrapper (restored byte-exact to 32-bit stack)" ;;
+        0:remove)   ok "wrapper: removed $wrapper (there was none before 'moon64 on')" ;;
+        0:gone)     ;;
+        0:foreign)  warn "$wrapper was replaced after 'moon64 on'; left as is" ;;
+        *)          warn "no saved 32-bit wrapper at $wrapper_bak; launcher left as is" ;;
+    esac
     case "$env_action" in
         restore)  ok "environment.d: $ENV_CONF restored (byte-exact)" ;;
         remove)   ok "environment.d: $ENV_CONF removed (was absent before 'moon64 on')" ;;
@@ -1209,7 +1267,11 @@ CONF
         esac
     done
     printf '\n'
-    ok "32-bit stack active — start Steam from your normal launcher"
+    if [ "$wrap_action" = remove ] || [ "$wrap_action" = gone ]; then
+        ok "moon64 is off — Steam starts as it did before 'moon64 on', without SLSsteam"
+    else
+        ok "32-bit stack active — start Steam from your normal launcher"
+    fi
 }
 
 cmd_status() {
