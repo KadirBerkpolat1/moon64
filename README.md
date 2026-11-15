@@ -187,17 +187,20 @@ Steam roots listed above; a Flatpak install under
 downloads the 64-bit `SLSsteam.so` from `SLSM_PREBUILT_URL`, or by default
 from the slsteam-moon-64 release asset named by `SLS64_PREBUILT_URL` in
 [`versions.env`](versions.env), and `netsock64.so` from the same release
-directory, and stages them without compiling anything. The release must
-publish `pattern-status.txt` next to the libraries, naming both, and
-`install.sh` checks the downloads as strictly as a build:
+directory when the release carries one, and stages them without compiling
+anything. The release must publish `pattern-status.txt` next to the library,
+naming the `SLSsteam.so` it was measured on; a release that also carries
+`netsock64.so` must name it there too. `v1.0.0` carries only the library, and
+its `pattern-status.txt` names only `SLSsteam.so`. `install.sh` checks the
+downloads as strictly as a build:
 
 - `<file>.sha256`, when published, must match; a mismatch stops the install.
   Without one, `install.sh` warns and relies on the binding below.
 - `pattern-status.txt` must contain exactly one `binary_sha256=` line equal to
-  the downloaded `SLSsteam.so`'s SHA-256, and exactly one `netsock64_sha256=`
-  line equal to the downloaded `netsock64.so`'s, so a status file from another
-  build cannot vouch for either.
-- Both must be 64-bit x86-64 ELF shared objects.
+  the downloaded `SLSsteam.so`'s SHA-256 and, in a release that carries
+  `netsock64.so`, exactly one `netsock64_sha256=` line equal to the downloaded
+  `netsock64.so`'s, so a status file from another build cannot vouch for either.
+- Every downloaded library must be a 64-bit x86-64 ELF shared object.
 - `pattern-status.txt` must pass the same pattern gate as a source build.
 - `SLSsteam.so`'s libraries, symbol versions and glibc requirement must
   resolve on this host.
