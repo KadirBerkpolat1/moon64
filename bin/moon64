@@ -961,7 +961,7 @@ cmd_on() {
         case "$(netsock64_state_check)" in
             mismatch)
                 if [ "${SLSM_ALLOW_UNVERIFIED_NETSOCK:-0}" = 1 ]; then
-                    warn "SLSM_ALLOW_UNVERIFIED_NETSOCK=1: activating with unverified $MOON_DIR/netsock64.so (sha256 mismatch against $MOON_DIR/netsock64.state)"
+                    warn "SLSM_ALLOW_UNVERIFIED_NETSOCK=1: activating although $MOON_DIR/netsock64.so does not match $MOON_DIR/netsock64.state; the wrapper still skips it at launch (P2P cert patch inactive) unless SLSM_ALLOW_UNVERIFIED_NETSOCK=1 is also in Steam's environment"
                 else
                     die "refusing to activate: $MOON_DIR/netsock64.so changed since install.sh recorded it in $MOON_DIR/netsock64.state (re-run install.sh to restage it, or set SLSM_ALLOW_UNVERIFIED_NETSOCK=1 to override)"
                 fi
