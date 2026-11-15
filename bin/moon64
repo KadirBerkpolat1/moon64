@@ -1057,7 +1057,7 @@ cmd_off() {
         cmp -s "$STAGE_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so.32" || die "staged SLSsteam.so byte mismatch"
         stage_sls=1
     elif [ "$(elfbits "$SLS_DIR/SLSsteam.so")" = 64 ]; then
-        die "cannot restore 32-bit stack: $SLS_DIR/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit"
+        die "cannot restore 32-bit stack: $SLS_DIR/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit (re-run install.sh with network access to fetch one)"
     fi
 
     if [ -f "$CR_DIR/cloud_redirect.so.32" ]; then
@@ -1415,6 +1415,38 @@ check_proton_state() {
         dim "managed games: none recorded ($fix_dir)"
     fi
 }
+# check_rollback_target <active SLSsteam bits> — report what `off` would restore
+# and where it came from. Returns 1 when the saved .32 is not 32-bit.
+check_rollback_target() {
+    local active="$1" f="$SLS_DIR/SLSsteam.so.32" state="$MOON_DIR/rollback32.state" ver want got
+    printf '%s\n' "-- rollback target --"
+    if [ ! -f "$f" ]; then
+        if [ "$active" = 32 ]; then
+            dim "no $f yet; 'moon64 on' saves the active 32-bit SLSsteam.so there"
+        else
+            warn "no $f: 'moon64 off' cannot restore a 32-bit stack — re-run install.sh with network access"
+        fi
+        return 0
+    fi
+    if [ "$(elfbits "$f")" != 32 ]; then
+        bad "$f is not 32-bit; 'moon64 off' would refuse it"
+        return 1
+    fi
+    if [ ! -f "$state" ]; then
+        ok "$f: saved from the 32-bit SLSsteam installed before moon64"
+        return 0
+    fi
+    ver="$(sed -n 's/^version=//p' "$state" | tail -n1)"
+    want="$(sed -n 's/^sha256=//p' "$state" | tail -n1)"
+    got="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+    if [ -n "$want" ] && [ "$got" = "$want" ]; then
+        ok "$f: upstream SLSsteam $ver, fetched by install.sh (sha256 $got)"
+    else
+        warn "$f no longer matches the upstream download recorded in $state"
+    fi
+    return 0
+}
+
 # check_desktop_entries <active SLSsteam bits> — report where the Steam desktop
 # entries point. Returns the number of blocking problems: an entry `on` would
 # refuse to rewrite, or one that bypasses the wrapper while 64-bit is active.
@@ -1507,6 +1539,7 @@ cmd_doctor() {
         dim "environment.d: STEAM_FORCE_CLIENT=$env_val"
     fi
 
+    check_rollback_target "$sls" || problems=$((problems + $?))
     check_desktop_entries "$sls" || problems=$((problems + $?))
 
     check_proton_state

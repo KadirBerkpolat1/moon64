@@ -17,7 +17,10 @@
 #   ~/.local/share/moon64/netsock64.so          cert patch, built here
 #   ~/.local/share/moon64/wrapper.64.sh         the 64-bit Steam wrapper
 #   ~/.local/share/moon64/moon64                the switcher
-#   ~/.local/share/SLSsteam/SLSsteam.so.32      saved 32-bit SLSsteam (rollback)
+#   ~/.local/share/SLSsteam/SLSsteam.so.32      32-bit SLSsteam for rollback: the one
+#                                               already installed, else the pinned
+#                                               upstream release (versions.env)
+#   ~/.local/share/moon64/rollback32.state      where a fetched .32 came from
 #   ~/.local/share/CloudRedirect/<f>.64/.32     staged CloudRedirect variants
 #   ~/.local/share/Lumen/lua                    Lumen fork tree (--with-lumen-patch)
 #   ~/.local/share/Lumen/luatools/plugin        LuaTools plugin tree (same flag)
@@ -115,6 +118,107 @@ check_pattern_gate() {
     return 0
 }
 
+# is_elf32_i386 <file> — true for a 32-bit x86 ELF, the class `moon64 off` restores.
+is_elf32_i386() {
+    local info
+    info="$(file -b "$1" 2>/dev/null || true)"
+    case "$info" in 'ELF 32-bit'*', Intel '*) return 0 ;; esac
+    return 1
+}
+
+# extract_member <archive> <member> <out> — unpack one file with 7z or bsdtar
+# (libarchive reads 7z). Returns 2 when neither is installed.
+extract_member() {
+    local archive="$1" member="$2" out="$3" x
+    for x in 7z 7za 7zr; do
+        command -v "$x" >/dev/null 2>&1 || continue
+        "$x" x -so "$archive" "$member" > "$out" 2>/dev/null && [ -s "$out" ]
+        return
+    done
+    if command -v bsdtar >/dev/null 2>&1; then
+        bsdtar -xOf "$archive" "$member" > "$out" 2>/dev/null && [ -s "$out" ]
+        return
+    fi
+    return 2
+}
+
+# provision_rollback32 — save the pinned upstream 32-bit SLSsteam as
+# $SLS_DIR/SLSsteam.so.32 and record its source in $MOON_DIR/rollback32.state.
+# Never replaces an existing .32. Returns 1 when it cannot be fetched or
+# unpacked (rollback unavailable, warned), 2 when the download fails its
+# SHA-256 or 32-bit ELF check (nothing saved).
+provision_rollback32() {
+    local dst="$SLS_DIR/SLSsteam.so.32" state="$MOON_DIR/rollback32.state"
+    local url="${SLSM_SLS32_URL:-${SLS32_URL:-}}" want="${SLSM_SLS32_SHA256:-${SLS32_SHA256:-}}"
+    local version="${SLSM_SLS32_VERSION:-${SLS32_VERSION:-}}" member="${SLS32_MEMBER:-bin/SLSsteam.so}"
+    local tmp got so_sha xrc part
+
+    if [ -e "$dst" ]; then
+        ok "rollback target present: $dst"
+        return 0
+    fi
+    if [ -z "$url" ] || [ -z "$want" ]; then
+        warn "no pinned 32-bit SLSsteam release; 'moon64 off' will have no 32-bit stack to restore"
+        return 1
+    fi
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/moon64-sls32.XXXXXX")" || { warn "cannot create a temporary directory"; return 1; }
+    dim "fetching the 32-bit rollback target: upstream SLSsteam $version"
+    if ! curl -fsSL --connect-timeout 15 --max-time 300 -o "$tmp/archive" "$url" 2>/dev/null; then
+        rm -rf "$tmp"
+        warn "cannot download $url; 'moon64 off' will have no 32-bit stack to restore"
+        dim "  re-run install.sh with network access to fetch it"
+        return 1
+    fi
+    got="$(sha256sum "$tmp/archive" | cut -d' ' -f1)"
+    if [ "$got" != "$want" ]; then
+        rm -rf "$tmp"
+        bad "$url: sha256 $got does not match the pinned $want"
+        return 2
+    fi
+    extract_member "$tmp/archive" "$member" "$tmp/SLSsteam.so"
+    xrc=$?
+    if [ "$xrc" = 2 ]; then
+        rm -rf "$tmp"
+        warn "neither 7z nor bsdtar is installed to unpack $url; 'moon64 off' will have no 32-bit stack to restore"
+        dim "  install p7zip (7z) or libarchive (bsdtar) and re-run install.sh"
+        return 1
+    elif [ "$xrc" != 0 ]; then
+        rm -rf "$tmp"
+        bad "cannot extract $member from $url"
+        return 2
+    fi
+    if ! is_elf32_i386 "$tmp/SLSsteam.so"; then
+        bad "$member from $url is not a 32-bit i386 ELF ($(file -b "$tmp/SLSsteam.so" 2>/dev/null)); refusing to save it as $dst"
+        rm -rf "$tmp"
+        return 2
+    fi
+    so_sha="$(sha256sum "$tmp/SLSsteam.so" | cut -d' ' -f1)"
+    part="$SLS_DIR/.SLSsteam.so.32.moon64-tmp.$$"
+    if ! mkdir -p "$SLS_DIR" "$MOON_DIR" || ! install -m 755 "$tmp/SLSsteam.so" "$part"; then
+        rm -rf "$tmp" "$part"
+        warn "cannot write $dst; 'moon64 off' will have no 32-bit stack to restore"
+        return 1
+    fi
+    rm -rf "$tmp"
+    if [ -e "$dst" ]; then
+        rm -f "$part"
+        ok "rollback target present: $dst"
+        return 0
+    fi
+    mv -f "$part" "$dst" || { rm -f "$part"; warn "cannot write $dst"; return 1; }
+    {
+        printf '# Written by moon64 install.sh: where %s came from.\n' "$dst"
+        printf 'source=upstream-release\n'
+        printf 'version=%s\n' "$version"
+        printf 'url=%s\n' "$url"
+        printf 'archive_sha256=%s\n' "$got"
+        printf 'member=%s\n' "$member"
+        printf 'sha256=%s\n' "$so_sha"
+        printf 'fetched=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$state" || warn "cannot record the rollback source in $state"
+    ok "rollback target: upstream SLSsteam $version (32-bit) saved as $dst"
+}
+
 # Allow sourcing install.sh in unit tests without executing installer steps.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
@@ -124,7 +228,7 @@ for arg in "$@"; do
     case "$arg" in
         --with-cloudredirect) with_cloudredirect=1 ;;
         --with-lumen-patch)   with_lumen_patch=1 ;;
-        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
         *) die "unknown argument: $arg" ;;
     esac
 done
@@ -344,6 +448,15 @@ mkdir -p "$SLS_DIR"
 if [ -f "$SLS_DIR/SLSsteam.so" ] && ! is_elf64 "$SLS_DIR/SLSsteam.so" && [ ! -f "$SLS_DIR/SLSsteam.so.32" ]; then
     cp -a "$SLS_DIR/SLSsteam.so" "$SLS_DIR/SLSsteam.so.32" || die "cannot save the 32-bit SLSsteam"
     ok "saved the 32-bit SLSsteam.so for rollback"
+fi
+
+# A machine that never had upstream SLSsteam has nothing for `moon64 off` to
+# go back to. Fetch the pinned 32-bit upstream release instead. No network or
+# no unpacker only costs the rollback target; a download that fails its digest
+# or ELF-class check stops the install.
+if [ ! -e "$SLS_DIR/SLSsteam.so.32" ]; then
+    provision_rollback32
+    [ "$?" -ne 2 ] || die "refusing to continue with an unverified rollback download"
 fi
 
 # --- 2. netsock64 -----------------------------------------------------------

@@ -26,6 +26,10 @@ AGPL-3.0 — see [`LICENSE`](LICENSE).
   (only with `--with-lumen-patch`). Each is cloned from the pin in
   [`versions.env`](versions.env) and keeps its own licence.
   `netsock64.so` is built from this repo's own source.
+- **Downloaded at install time, not redistributed here:** upstream
+  [AceSLS/SLSsteam](https://github.com/AceSLS/SLSsteam)'s 32-bit release
+  (AGPL-3.0), only when no 32-bit SLSsteam is installed, as the rollback
+  target. Pinned with its SHA-256 in [`versions.env`](versions.env).
 
 ## Quickstart
 
@@ -33,10 +37,10 @@ On a clean machine, do these first:
 
 1. Install the **native** Steam client (not Flatpak) and start it once, so it
    downloads its 64-bit client into `steamrt64/`.
-2. Install upstream [SLSsteam](https://github.com/AceSLS/SLSsteam) (the 32-bit
-   release) by following its README, and check that Steam starts with it.
-   moon64 hooks into SLSsteam's launcher (`~/.local/share/SLSsteam/path/steam`),
-   and that 32-bit install is the only thing `moon64 off` can return to — see
+2. Optional: install upstream [SLSsteam](https://github.com/AceSLS/SLSsteam)
+   (the 32-bit release) first if you want `moon64 off` to return to a working
+   32-bit SLSsteam stack. Without it, `install.sh` fetches the upstream 32-bit
+   library as the rollback target and `off` returns to stock Steam — see
    [Rollback](#rollback).
 3. Optional: install [Lumen](https://github.com/swwayps/lumen) if you want
    `--with-lumen-patch`, and the 32-bit CloudRedirect if you want cloud saves.
@@ -70,7 +74,8 @@ Optional pieces are flags to the same installer:
 |---|---|---|
 | Linux x86_64 with **glibc >= 2.38** | building and loading the 64-bit `SLSsteam.so` (C++20 `__isoc23_strto*`) | `install.sh` refuses older glibc |
 | Native Steam in `~/.steam/steam`, `~/.local/share/Steam` or `~/.steam/debian-installation`, with `steamrt64/steam` and `steamrt64/steamclient.so` present | the 64-bit client | `moon64 doctor` |
-| Upstream 32-bit SLSsteam, already installed | the launcher hook and the rollback target | not checked — see [Rollback](#rollback) |
+| Upstream 32-bit SLSsteam | the rollback target | fetched by `install.sh` when absent; reported by `moon64 doctor` — see [Rollback](#rollback) |
+| `7z` (p7zip) or `bsdtar` (libarchive) | unpacking the upstream 32-bit release | `install.sh` (warning only: without it there is no rollback target) |
 | Running as your desktop user, not root | file ownership under `~/.local/share` | `install.sh` |
 | `git`, `curl`, `file`, `readelf` (binutils), `ldd` | fetching sources, ELF checks | `install.sh` |
 | `gcc`, `g++` (C++20), `make` | building `netsock64.so` and `SLSsteam.so` | `install.sh` |
@@ -210,14 +215,26 @@ checks each restored file byte for byte against its saved copy. `install.sh`
 never overwrites an existing `.32` original, so repeated `on`/`off` cycles
 cannot degrade it.
 
-Rollback is only possible if a 32-bit SLSsteam was installed **before** moon64.
-`install.sh` and `moon64 on` save `SLSsteam.so.32` only when a 32-bit
-`SLSsteam.so` is already in `~/.local/share/SLSsteam`. On a machine that never
-had one there is nothing to go back to, and `off` refuses:
+Where the 32-bit `SLSsteam.so.32` comes from:
+
+- If a 32-bit `SLSsteam.so` is already in `~/.local/share/SLSsteam`,
+  `install.sh` (or `moon64 on`) saves that one.
+- Otherwise `install.sh` downloads upstream AceSLS SLSsteam release
+  `20261106120254`, the last one that ships a 32-bit library (pinned with its
+  SHA-256 in [`versions.env`](versions.env)). It checks the digest and that
+  `bin/SLSsteam.so` is a 32-bit i386 ELF, saves it as `SLSsteam.so.32`, and
+  records the URL, version and both digests in
+  `~/.local/share/moon64/rollback32.state`. A digest or ELF-class mismatch stops
+  the install. No network, or no `7z`/`bsdtar` to unpack it, only costs the
+  rollback target: the install continues with a warning.
+
+`moon64 doctor` shows which of the two you have. Without either, `off` refuses
+rather than leave a 64-bit library behind:
 
 ```
-fail  cannot restore 32-bit stack: /home/you/.local/share/SLSsteam/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit
+fail  cannot restore 32-bit stack: /home/you/.local/share/SLSsteam/SLSsteam.so.32 missing while active SLSsteam.so is 64-bit (re-run install.sh with network access to fetch one)
 ```
 
-To get a rollback target, install upstream SLSsteam first (step 2 of the
-[Quickstart](#quickstart)), then run `install.sh` and `moon64 on`.
+`off` returns the launcher to what it was before `on`. On a machine that never
+had upstream SLSsteam, that is Steam's own desktop entry, so Steam starts
+without SLSsteam until you set up upstream's launcher.
