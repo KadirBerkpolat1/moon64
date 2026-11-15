@@ -201,7 +201,11 @@ unsigned int la_version(unsigned int version)
 {
     if (is_steam_process())
         logf_("audit loaded, la_version %u", version);
-    return LAV_CURRENT;
+    /* Answer with what the loader offered, capped at what we implement. Asking
+     * for LAV_CURRENT unconditionally aborts the process on a loader that only
+     * knows an older interface, instead of letting it ignore us. */
+    return version == 0 ? LAV_CURRENT
+                        : (version < LAV_CURRENT ? version : LAV_CURRENT);
 }
 
 unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie)
