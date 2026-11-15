@@ -11,6 +11,8 @@
 #   --with-cloudredirect   build and stage the 64-bit CloudRedirect pair
 #   --with-lumen-patch     overlay the pinned Lumen + LuaTools trees into
 #                          ~/.local/share/Lumen/ (fixes menu, FakeAppId swap)
+#   --install-deps         install missing prerequisites with the distro package
+#                          manager (pacman, apt-get, dnf) through `sudo -n`
 #
 # Layout it produces:
 #   ~/.local/share/moon64/SLSsteam.so.64        staged 64-bit SLSsteam
@@ -219,26 +221,185 @@ provision_rollback32() {
     ok "rollback target: upstream SLSsteam $version (32-bit) saved as $dst"
 }
 
+# --- prerequisites ----------------------------------------------------------
+
+# have_header <header> — true when the C++ compiler can include it.
+have_header() {
+    local cxx="${CXX:-g++}"
+    command -v "$cxx" >/dev/null 2>&1 || return 1
+    "$cxx" -x c++ -fsyntax-only - >/dev/null 2>&1 <<EOF
+#include <$1>
+int main(void){return 0;}
+EOF
+}
+
+# missing_deps <dep...> — set MISSING_DEPS to the deps not on this host.
+MISSING_DEPS=()
+missing_deps() {
+    local d
+    MISSING_DEPS=()
+    for d in "$@"; do
+        case "$d" in
+            libcurl-headers) have_header curl/curl.h ;;
+            openssl-headers) have_header openssl/evp.h ;;
+            g++)             command -v "${CXX:-g++}" >/dev/null 2>&1 ;;
+            bsdtar)          command -v 7z >/dev/null 2>&1 || command -v 7za >/dev/null 2>&1 \
+                                 || command -v 7zr >/dev/null 2>&1 || command -v bsdtar >/dev/null 2>&1 ;;
+            *)               command -v "$d" >/dev/null 2>&1 ;;
+        esac || MISSING_DEPS+=("$d")
+    done
+}
+
+# dep_package <manager> <dep> — the package providing <dep> on that distro family.
+dep_package() {
+    case "$1:$2" in
+        pacman:g++)              printf 'gcc' ;;
+        apt-get:g++)             printf 'g++' ;;
+        dnf:g++)                 printf 'gcc-c++' ;;
+        *:readelf)               printf 'binutils' ;;
+        pacman:ldd)              printf 'glibc' ;;
+        apt-get:ldd)             printf 'libc-bin' ;;
+        dnf:ldd)                 printf 'glibc-common' ;;
+        pacman:libcurl-headers)  printf 'curl' ;;
+        apt-get:libcurl-headers) printf 'libcurl4-openssl-dev' ;;
+        dnf:libcurl-headers)     printf 'libcurl-devel' ;;
+        pacman:openssl-headers)  printf 'openssl' ;;
+        apt-get:openssl-headers) printf 'libssl-dev' ;;
+        dnf:openssl-headers)     printf 'openssl-devel' ;;
+        pacman:bsdtar)           printf 'libarchive' ;;
+        apt-get:bsdtar)          printf 'libarchive-tools' ;;
+        *)                       printf '%s' "$2" ;;
+    esac
+}
+
+# deps_packages <manager> <dep...> — the packages for those deps, deduplicated.
+deps_packages() {
+    local pm="$1" d p out=" "
+    shift
+    for d in "$@"; do
+        p="$(dep_package "$pm" "$d")"
+        case "$out" in *" $p "*) ;; *) out="$out$p " ;; esac
+    done
+    out="${out# }"
+    printf '%s' "${out% }"
+}
+
+# deps_install_cmd <manager> <dep...> — the command a user would run.
+deps_install_cmd() {
+    local pm="$1" pkgs
+    shift
+    pkgs="$(deps_packages "$pm" "$@")"
+    case "$pm" in
+        pacman)  printf 'sudo pacman -S --needed %s' "$pkgs" ;;
+        apt-get) printf 'sudo apt-get install -y %s' "$pkgs" ;;
+        dnf)     printf 'sudo dnf install -y %s' "$pkgs" ;;
+    esac
+}
+
+# detect_pkg_manager — pacman, apt-get or dnf ($SLSM_PKG_MANAGER overrides).
+detect_pkg_manager() {
+    local pm
+    case "${SLSM_PKG_MANAGER:-}" in
+        pacman|apt-get|dnf) printf '%s' "$SLSM_PKG_MANAGER"; return 0 ;;
+    esac
+    for pm in pacman apt-get dnf; do
+        if command -v "$pm" >/dev/null 2>&1; then printf '%s' "$pm"; return 0; fi
+    done
+    return 1
+}
+
+join_list() {
+    local out="" d
+    for d in "$@"; do out="${out:+$out, }$d"; done
+    printf '%s' "$out"
+}
+
+# check_deps <install:0|1> <required...> [-- <optional...>] — report every
+# missing prerequisite as one list with the package-manager command. With
+# install=1, run that command through `sudo -n`; a sudo that wants a password
+# stops here instead of prompting. Returns 1 while a required dep is missing.
+check_deps() {
+    local install="$1" d pm opt=0
+    local -a req=() optional=() miss_req=() miss_opt=() pkgs=() run=()
+    shift
+    for d in "$@"; do
+        if [ "$d" = -- ]; then opt=1
+        elif [ "$opt" = 1 ]; then optional+=("$d")
+        else req+=("$d")
+        fi
+    done
+    missing_deps "${req[@]}"; miss_req=("${MISSING_DEPS[@]}")
+    missing_deps "${optional[@]}"; miss_opt=("${MISSING_DEPS[@]}")
+    if [ "${#miss_req[@]}" -eq 0 ] && [ "${#miss_opt[@]}" -eq 0 ]; then
+        ok "all prerequisites present"
+        return 0
+    fi
+
+    [ "${#miss_req[@]}" -eq 0 ] || bad "missing prerequisites: $(join_list "${miss_req[@]}")"
+    [ "${#miss_opt[@]}" -eq 0 ] || warn "missing optional: $(join_list "${miss_opt[@]}") (7z or bsdtar unpacks the upstream 32-bit rollback target)"
+    if pm="$(detect_pkg_manager)"; then
+        dim "  install with: $(deps_install_cmd "$pm" "${miss_req[@]}" "${miss_opt[@]}")"
+    else
+        dim "  no pacman, apt-get or dnf found; the packages are:"
+        for d in pacman apt-get dnf; do
+            dim "    $(deps_install_cmd "$d" "${miss_req[@]}" "${miss_opt[@]}")"
+        done
+    fi
+    if [ "$install" != 1 ]; then
+        [ "${#miss_req[@]}" -eq 0 ] && return 0
+        dim "  or re-run install.sh with --install-deps to have it run that command"
+        return 1
+    fi
+
+    if [ -z "$pm" ]; then
+        bad "--install-deps: no supported package manager (pacman, apt-get, dnf)"
+        return 1
+    fi
+    if ! command -v sudo >/dev/null 2>&1; then
+        bad "--install-deps: sudo not found; run the command above as root, then re-run install.sh"
+        return 1
+    fi
+    if ! sudo -n true >/dev/null 2>&1; then
+        bad "--install-deps: sudo needs a password, and install.sh will not prompt for one"
+        dim "  run the command above yourself, then re-run install.sh"
+        return 1
+    fi
+    read -r -a pkgs <<< "$(deps_packages "$pm" "${miss_req[@]}" "${miss_opt[@]}")"
+    case "$pm" in
+        pacman)  run=(pacman -S --needed --noconfirm) ;;
+        apt-get) run=(apt-get install -y) ;;
+        dnf)     run=(dnf install -y) ;;
+    esac
+    dim "running: sudo -n ${run[*]} ${pkgs[*]}"
+    if ! sudo -n "${run[@]}" "${pkgs[@]}"; then
+        bad "--install-deps: '${run[*]} ${pkgs[*]}' failed"
+        return 1
+    fi
+    missing_deps "${req[@]}"
+    if [ "${#MISSING_DEPS[@]}" -gt 0 ]; then
+        bad "still missing after installing ${pkgs[*]}: $(join_list "${MISSING_DEPS[@]}")"
+        return 1
+    fi
+    ok "installed ${pkgs[*]}"
+}
+
 # Allow sourcing install.sh in unit tests without executing installer steps.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 
 with_cloudredirect=0
 with_lumen_patch=0
+install_deps=0
 for arg in "$@"; do
     case "$arg" in
         --with-cloudredirect) with_cloudredirect=1 ;;
         --with-lumen-patch)   with_lumen_patch=1 ;;
-        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+        --install-deps)       install_deps=1 ;;
+        -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
         *) die "unknown argument: $arg" ;;
     esac
 done
 
 [ "$(id -u)" -ne 0 ] || die "run as your desktop user, not root"
-command -v curl    >/dev/null || die "curl is required"
-command -v gcc     >/dev/null || die "gcc is required to build netsock64"
-command -v file    >/dev/null || die "file is required"
-command -v readelf >/dev/null || die "readelf (binutils) is required"
-command -v ldd     >/dev/null || die "ldd is required"
 
 [ -f "$HERE/bin/moon64" ] || die "bin/moon64 missing from the checkout"
 mkdir -p "$MOON_DIR" || die "cannot create $MOON_DIR"
@@ -337,12 +498,22 @@ if [ -z "$src_dir" ]; then
     fi
 fi
 
+# Prerequisites, checked up front and reported as one list. Packages are only
+# installed with --install-deps, and then only through a sudo that does not ask
+# for a password: the installer never prompts for root or uses it unasked.
+deps_req=(curl gcc g++ make readelf file ldd libcurl-headers openssl-headers)
+[ -f "$src_dir/Makefile" ] || deps_req+=(git)
+deps_opt=()
+if [ ! -e "$SLS_DIR/SLSsteam.so.32" ] && { [ ! -f "$SLS_DIR/SLSsteam.so" ] || is_elf64 "$SLS_DIR/SLSsteam.so"; }; then
+    deps_opt+=(bsdtar)
+fi
+check_deps "$install_deps" "${deps_req[@]}" -- "${deps_opt[@]}" || die "missing prerequisites"
+
 # Fetch the pinned checkout when it is not present. The fork is a public repo
 # cloned anonymously over HTTPS (the normal path); gh is only used as a
 # convenience when it is already authenticated. GIT_TERMINAL_PROMPT=0 keeps
 # plain git from stopping on a credential prompt in non-interactive runs.
 if [ ! -f "$src_dir/Makefile" ]; then
-    command -v git >/dev/null || die "git is required to fetch the SLSsteam source"
     mkdir -p "$(dirname "$src_dir")" || die "cannot create $(dirname "$src_dir")"
     dim "cloning $SLS64_REPO ($SLS64_REF) into $src_dir"
 
@@ -376,34 +547,7 @@ fi
 # and everything else silently off. Staging that looks like success and is not.
 check_pattern_gate "$src_dir" || die "refusing to stage an incomplete build"
 
-# Build requirements: a host C++20 toolchain, make, and the 64-bit dev
-# libraries the fork links or generates against.
-command -v make >/dev/null || die "make is required"
-command -v "${CXX:-g++}" >/dev/null || die "a C++ compiler is required (g++)"
 command -v pkg-config >/dev/null || dim "note: pkg-config not found; build may still work"
-
-# curl/ssl headers are needed by pattern-refresh; openssl by the same target.
-missing_dev=""
-printf '#include <curl/curl.h>
-int main(void){return 0;}
-'     | "${CXX:-g++}" -x c++ -fsyntax-only - >/dev/null 2>&1     || missing_dev="$missing_dev libcurl-dev"
-printf '#include <openssl/evp.h>
-int main(void){return 0;}
-'     | "${CXX:-g++}" -x c++ -fsyntax-only - >/dev/null 2>&1     || missing_dev="$missing_dev libssl-dev"
-if [ -n "$missing_dev" ]; then
-    case "$(uname -s)" in
-        Linux)
-            if command -v pacman >/dev/null 2>&1; then
-                dim "install with: sudo pacman -S --needed curl openssl"
-            elif command -v apt-get >/dev/null 2>&1; then
-                dim "install with: sudo apt-get install -y libcurl4-openssl-dev libssl-dev"
-            elif command -v dnf >/dev/null 2>&1; then
-                dim "install with: sudo dnf install -y libcurl-devel openssl-devel"
-            fi
-            ;;
-    esac
-    die "missing build headers:$missing_dev"
-fi
 
 # Build host floor. The x86_64 source is C++20, and under C++20 glibc's own
 # <cstdlib> redirects strtol/strtoul/strtoll/strtoull to __isoc23_strto*,

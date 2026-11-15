@@ -68,6 +68,10 @@ Optional pieces are flags to the same installer:
 ./install.sh --with-cloudredirect --with-lumen-patch
 ```
 
+If prerequisites are missing, `install.sh` lists them with the package-manager
+command to install them; `./install.sh --install-deps` runs that command for
+you (see [Requirements](#requirements)).
+
 ## Requirements
 
 | Requirement | Needed for | Checked by |
@@ -75,11 +79,11 @@ Optional pieces are flags to the same installer:
 | Linux x86_64 with **glibc >= 2.38** | building and loading the 64-bit `SLSsteam.so` (C++20 `__isoc23_strto*`) | `install.sh` refuses older glibc |
 | Native Steam in `~/.steam/steam`, `~/.local/share/Steam` or `~/.steam/debian-installation`, with `steamrt64/steam` and `steamrt64/steamclient.so` present | the 64-bit client | `moon64 doctor` |
 | Upstream 32-bit SLSsteam | the rollback target | fetched by `install.sh` when absent; reported by `moon64 doctor` — see [Rollback](#rollback) |
-| `7z` (p7zip) or `bsdtar` (libarchive) | unpacking the upstream 32-bit release | `install.sh` (warning only: without it there is no rollback target) |
+| `7z` (p7zip) or `bsdtar` (libarchive) | unpacking the upstream 32-bit release | `install.sh` (warning only: without it there is no rollback target; installed by `--install-deps`) |
 | Running as your desktop user, not root | file ownership under `~/.local/share` | `install.sh` |
-| `git`, `curl`, `file`, `readelf` (binutils), `ldd` | fetching sources, ELF checks | `install.sh` |
-| `gcc`, `g++` (C++20), `make` | building `netsock64.so` and `SLSsteam.so` | `install.sh` |
-| libcurl and OpenSSL development headers | building `SLSsteam.so` | `install.sh` |
+| `git`, `curl`, `file`, `readelf` (binutils), `ldd` | fetching sources, ELF checks | `install.sh` (installed by `--install-deps`) |
+| `gcc`, `g++` (C++20), `make` | building `netsock64.so` and `SLSsteam.so` | `install.sh` (installed by `--install-deps`) |
+| libcurl and OpenSSL development headers | building `SLSsteam.so` | `install.sh` (installed by `--install-deps`) |
 | 64-bit `libdbus-1.so.3` and a `libstdc++` with `GLIBCXX_3.4.32` (GCC 13+) | loading `SLSsteam.so` in the client | `install.sh`, `moon64 doctor` |
 | 64-bit `libcurl.so.4` | SLSsteam's network features (loaded at runtime) | `install.sh` (warning only) |
 | `cmake` | `--with-cloudredirect` only | `bin/build-cloudredirect.sh` |
@@ -92,21 +96,25 @@ Check the glibc floor:
 getconf GNU_LIBC_VERSION
 ```
 
-Arch Linux and derivatives:
+`install.sh` checks the command-line tools and headers above before it does
+anything else and prints everything that is missing as one list, with the
+exact `pacman`, `apt-get` or `dnf` command that installs it. It installs
+nothing by itself. To let it run that command, pass `--install-deps`:
 
 ```sh
-sudo pacman -S --needed base-devel git curl openssl file binutils dbus cmake
+./install.sh --install-deps
 ```
 
-On Debian/Ubuntu or Fedora, install your compiler toolchain, `git`, `curl`,
-`file` and binutils, plus the headers the installer asks for:
+With that flag it runs the package manager through `sudo -n`, which never
+prompts. If sudo needs a password, `install.sh` says so and stops; run the
+printed command yourself, then run `install.sh` again. The runtime libraries
+(`libdbus`, `libstdc++`, `libcurl.so.4`) and `cmake` are not covered by this
+and are still reported by the checks listed in the table.
+
+On Arch Linux and derivatives, this covers everything in the table in one go:
 
 ```sh
-sudo apt-get install -y libcurl4-openssl-dev libssl-dev
-```
-
-```sh
-sudo dnf install -y libcurl-devel openssl-devel
+sudo pacman -S --needed base-devel git curl openssl file binutils dbus cmake libarchive
 ```
 
 **Flatpak Steam is not supported.** moon64 only looks in the three native
