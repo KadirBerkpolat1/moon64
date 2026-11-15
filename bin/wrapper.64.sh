@@ -10,7 +10,8 @@
 #   * no $SLSDIR/lib32 on LD_LIBRARY_PATH (that path only exists for the
 #     32-bit libcrypto workaround)
 # Kept: the audit-stack guard, CloudRedirect via LD_PRELOAD, Lumen sidecar
-# launch, desktop-coverage reconciliation, and the netsock64 cert patch.
+# launch, desktop-coverage reconciliation, netsock64 cert patch, and intact
+# user Proton/Wine environment variables (WINEDLLOVERRIDES, PROTON_*).
 set -uo pipefail
 
 SLSDIR="$HOME/.local/share/SLSsteam"
@@ -142,4 +143,8 @@ fi
 # 32-bit stack has always had and is safe: SLSsteam's setup() bails on any
 # process whose name is not `steam`, and netsock64 only acts when a
 # steamclient.so is actually opened.  Both helpers therefore no-op.
+#
+# Proton/Wine variables (WINEDLLOVERRIDES, PROTON_*) are intentionally untouched
+# so user or per-game launch-option overrides reach Steam and Proton unchanged.
+# (Only the detached Lumen sidecar above strips loader vars for itself.)
 exec "$STEAM_BIN" "$@"
