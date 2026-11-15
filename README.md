@@ -30,6 +30,10 @@ AGPL-3.0 — see [`LICENSE`](LICENSE).
   [AceSLS/SLSsteam](https://github.com/AceSLS/SLSsteam)'s 32-bit release
   (AGPL-3.0), only when no 32-bit SLSsteam is installed, as the rollback
   target. Pinned with its SHA-256 in [`versions.env`](versions.env).
+  With `--prebuilt`, also the 64-bit `SLSsteam.so` release asset of
+  [slsteam-moon-64](https://github.com/KadirBerkpolat1/slsteam-moon-64)
+  (AGPL-3.0-only) instead of building it — see
+  [Prebuilt `SLSsteam.so`](#prebuilt-slssteamso).
 
 ## Quickstart
 
@@ -70,20 +74,22 @@ Optional pieces are flags to the same installer:
 
 If prerequisites are missing, `install.sh` lists them with the package-manager
 command to install them; `./install.sh --install-deps` runs that command for
-you (see [Requirements](#requirements)).
+you (see [Requirements](#requirements)). `./install.sh --prebuilt` downloads
+the 64-bit `SLSsteam.so` instead of building it, so it needs no C++ toolchain
+(see [Prebuilt `SLSsteam.so`](#prebuilt-slssteamso)).
 
 ## Requirements
 
 | Requirement | Needed for | Checked by |
 |---|---|---|
-| Linux x86_64 with **glibc >= 2.38** | building and loading the 64-bit `SLSsteam.so` (C++20 `__isoc23_strto*`) | `install.sh` refuses older glibc |
+| Linux x86_64 with **glibc >= 2.38** | building the 64-bit `SLSsteam.so` (C++20 `__isoc23_strto*`); a library built on this host then needs this host's glibc to load | `install.sh` refuses to build on older glibc; with `--prebuilt` it checks the downloaded library's glibc requirement against this host instead |
 | Native Steam in `~/.steam/steam`, `~/.local/share/Steam` or `~/.steam/debian-installation`, with `steamrt64/steam` and `steamrt64/steamclient.so` present | the 64-bit client | `moon64 doctor` |
 | Upstream 32-bit SLSsteam | the rollback target | fetched by `install.sh` when absent; reported by `moon64 doctor` — see [Rollback](#rollback) |
 | `7z` (p7zip) or `bsdtar` (libarchive) | unpacking the upstream 32-bit release | `install.sh` (warning only: without it there is no rollback target; installed by `--install-deps`) |
 | Running as your desktop user, not root | file ownership under `~/.local/share` | `install.sh` |
-| `git`, `curl`, `file`, `readelf` (binutils), `ldd` | fetching sources, ELF checks | `install.sh` (installed by `--install-deps`) |
-| `gcc`, `g++` (C++20), `make` | building `netsock64.so` and `SLSsteam.so` | `install.sh` (installed by `--install-deps`) |
-| libcurl and OpenSSL development headers | building `SLSsteam.so` | `install.sh` (installed by `--install-deps`) |
+| `git`, `curl`, `file`, `readelf` (binutils), `ldd` | fetching sources, ELF checks | `install.sh` (installed by `--install-deps`; `git` only for a source build) |
+| `gcc`, `g++` (C++20), `make` | building `netsock64.so` (`gcc`) and `SLSsteam.so` (all three) | `install.sh` (installed by `--install-deps`; `--prebuilt` needs only `gcc` unless it falls back to a build) |
+| libcurl and OpenSSL development headers | building `SLSsteam.so` | `install.sh` (installed by `--install-deps`; not needed by `--prebuilt` unless it falls back to a build) |
 | 64-bit `libdbus-1.so.3` and a `libstdc++` with `GLIBCXX_3.4.32` (GCC 13+) | loading `SLSsteam.so` in the client | `install.sh`, `moon64 doctor` |
 | 64-bit `libcurl.so.4` | SLSsteam's network features (loaded at runtime) | `install.sh` (warning only) |
 | `cmake` | `--with-cloudredirect` only | `bin/build-cloudredirect.sh` |
@@ -121,6 +127,35 @@ sudo pacman -S --needed base-devel git curl openssl file binutils dbus cmake lib
 Steam roots listed above; a Flatpak install under
 `~/.var/app/com.valvesoftware.Steam` is never found.
 
+### Prebuilt `SLSsteam.so`
+
+```sh
+./install.sh --prebuilt
+```
+
+downloads the 64-bit `SLSsteam.so` from `SLSM_PREBUILT_URL`, or by default
+from the slsteam-moon-64 release asset named by `SLS64_PREBUILT_URL` in
+[`versions.env`](versions.env), and stages it without building anything. The
+release must publish `pattern-status.txt` next to the library, and
+`install.sh` checks the download as strictly as a build:
+
+- `<url>.sha256`, when published, must match; a mismatch stops the install.
+  Without one, `install.sh` warns that the digest is unverified.
+- The file must be a 64-bit x86-64 ELF shared object.
+- `pattern-status.txt` must pass the same pattern gate as a source build.
+- Its libraries, symbol versions and glibc requirement must resolve on this
+  host.
+
+A failed check stops the install, with nothing staged. When the library or
+its `pattern-status.txt` cannot be downloaded (offline, or no release
+published yet), `install.sh` says so and builds from source instead, under
+the usual requirements and the glibc >= 2.38 floor. The final summary,
+`~/.local/share/moon64/slsteam64.state` and `moon64 doctor` all say which
+path produced `SLSsteam.so.64` and whether the active `SLSsteam.so` is it.
+
+slsteam-moon-64 has not published a release yet, so for now the default URL
+returns 404 and `--prebuilt` builds from source.
+
 ## What is in here
 
 | path | what it is |
@@ -130,7 +165,7 @@ Steam roots listed above; a Flatpak install under
 | `bin/wrapper.64.sh` | the 64-bit Steam launcher (what `SLSsteam/path/steam` becomes) |
 | `bin/moon64` | `on` / `off` / `status` / `doctor` switcher |
 | `install.sh` | stages every 64-bit piece; activates nothing |
-| `versions.env` | pinned sources: the slsteam-moon-64, Lumen and LuaTools forks and the CloudRedirect commit |
+| `versions.env` | pinned sources: the slsteam-moon-64, Lumen and LuaTools forks, the CloudRedirect commit, the prebuilt `SLSsteam.so` URL and the 32-bit rollback release |
 
 ## Why a switcher instead of one wrapper
 
@@ -147,7 +182,7 @@ is already on disk before it is used, so recovery never depends on the network.
 
 | component | 32-bit client | 64-bit client |
 |---|---|---|
-| `SLSsteam.so` | upstream release | built from source at install time (slsteam-moon-64, pinned in `versions.env`) |
+| `SLSsteam.so` | upstream release | built from source at install time (slsteam-moon-64, pinned in `versions.env`), or its release asset with `--prebuilt` |
 | `netsock64.so` (P2P cert patch) | **impossible** — anchor absent | built here |
 | `library-inject.so` (libcurl redirect) | required | **dropped** — the 64-bit client brings its own libcurl |
 | `lib32/libcrypto.so.1.1` | SHA-1 workaround | **dropped** — 32-bit only, irrelevant |

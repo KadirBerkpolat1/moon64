@@ -1415,6 +1415,46 @@ check_proton_state() {
         dim "managed games: none recorded ($fix_dir)"
     fi
 }
+
+# report_sls64_origin <active SLSsteam bits> — say whether the staged
+# SLSsteam.so.64 was downloaded prebuilt or built from source, and whether the
+# active SLSsteam.so is that binary.
+report_sls64_origin() {
+    local active="$1" f="$MOON_DIR/SLSsteam.so.64" state="$MOON_DIR/slsteam64.state" src want got origin
+    [ -f "$f" ] || return 0
+    if [ -f "$state" ]; then
+        src="$(sed -n 's/^source=//p' "$state" | tail -n1)"
+        want="$(sed -n 's/^sha256=//p' "$state" | tail -n1)"
+        case "$src" in
+            prebuilt)
+                origin="prebuilt, downloaded from $(sed -n 's/^url=//p' "$state" | tail -n1)"
+                [ "$(sed -n 's/^sha256_published=//p' "$state" | tail -n1)" = yes ] \
+                    || origin="$origin (no published sha256 to verify against)"
+                ;;
+            built)
+                origin="built from source at $(sed -n 's/^src=//p' "$state" | tail -n1) @ $(sed -n 's/^commit=//p' "$state" | tail -n1)"
+                ;;
+            *)
+                origin="of unknown origin ($state says source=${src:-nothing})"
+                ;;
+        esac
+        got="$(sha256sum "$f" 2>/dev/null | cut -d' ' -f1)"
+        [ -z "$want" ] || [ "$got" = "$want" ] \
+            || warn "$f changed since install.sh recorded it in $state"
+    else
+        origin="of unrecorded origin (staged before install.sh kept $state)"
+    fi
+    dim "staged SLSsteam.so.64: $origin"
+    if [ "$active" = 64 ]; then
+        if cmp -s "$SLS_DIR/SLSsteam.so" "$f"; then
+            ok "active SLSsteam.so is the staged binary ($origin)"
+        else
+            warn "active 64-bit SLSsteam.so differs from the staged $f — run 'moon64 on' to activate it"
+        fi
+    fi
+    return 0
+}
+
 # check_rollback_target <active SLSsteam bits> — report what `off` would restore
 # and where it came from. Returns 1 when the saved .32 is not 32-bit.
 check_rollback_target() {
@@ -1509,6 +1549,7 @@ cmd_doctor() {
     else
         bad "no 64-bit SLSsteam: active=${sls:-missing} staged=${staged:-missing}"; problems=$((problems+1))
     fi
+    report_sls64_origin "$sls"
 
     if [ -n "$dep_target" ]; then
         check_slssteam_runtime_deps "$dep_target" || problems=$((problems+1))

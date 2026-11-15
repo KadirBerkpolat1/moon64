@@ -13,9 +13,13 @@
 #                          ~/.local/share/Lumen/ (fixes menu, FakeAppId swap)
 #   --install-deps         install missing prerequisites with the distro package
 #                          manager (pacman, apt-get, dnf) through `sudo -n`
+#   --prebuilt             download the prebuilt x86_64 SLSsteam.so
+#                          ($SLSM_PREBUILT_URL, default in versions.env) instead
+#                          of building it; falls back to the source build
 #
 # Layout it produces:
 #   ~/.local/share/moon64/SLSsteam.so.64        staged 64-bit SLSsteam
+#   ~/.local/share/moon64/slsteam64.state       prebuilt or built, and from where
 #   ~/.local/share/moon64/netsock64.so          cert patch, built here
 #   ~/.local/share/moon64/wrapper.64.sh         the 64-bit Steam wrapper
 #   ~/.local/share/moon64/moon64                the switcher
@@ -389,12 +393,14 @@ check_deps() {
 with_cloudredirect=0
 with_lumen_patch=0
 install_deps=0
+prebuilt=0
 for arg in "$@"; do
     case "$arg" in
         --with-cloudredirect) with_cloudredirect=1 ;;
         --with-lumen-patch)   with_lumen_patch=1 ;;
         --install-deps)       install_deps=1 ;;
-        -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
+        --prebuilt)           prebuilt=1 ;;
+        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
         *) die "unknown argument: $arg" ;;
     esac
 done
@@ -479,13 +485,92 @@ probe_slssteam_deps() {
     ok "SLSsteam.so runtime dependencies satisfied ($(printf '%s' "$needed" | tr '\n' ' ' | sed 's/ $//'))"
 }
 
-# --- 1. SLSsteam 64-bit, built from source (staged, not activated) ---------
+# write_sls64_state <source> [key=value...] — record where SLSsteam.so.64 came
+# from, for the install summary and `moon64 doctor`.
+write_sls64_state() {
+    local src="$1" kv
+    shift
+    {
+        printf '# Written by moon64 install.sh: origin of SLSsteam.so.64.\n'
+        printf 'source=%s\n' "$src"
+        for kv in "$@"; do printf '%s\n' "$kv"; done
+        printf 'sha256=%s\n' "$(sha256sum "$MOON_DIR/SLSsteam.so.64" | cut -d' ' -f1)"
+        printf 'staged=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$MOON_DIR/slsteam64.state" || warn "cannot write $MOON_DIR/slsteam64.state"
+}
 
-# The stack is built from the pinned swwayps fork rather than downloaded as a
-# release binary. AceSLS's release is 64-bit and works, but it carries 6
-# feature modules and 17 patterns; this stack needs the fork's 79 modules
-# (LuaTools stplug-in, Lumen CEF-port contract, live appinfo provision, hot
-# reload) and its 61 patterns. See versions.env.
+# fetch_prebuilt — stage the prebuilt x86_64 SLSsteam.so published at
+# $SLSM_PREBUILT_URL (default SLS64_PREBUILT_URL) as $MOON_DIR/SLSsteam.so.64.
+# The release must carry pattern-status.txt next to the library, and the same
+# gate as a source build applies to it; <url>.sha256 is verified when published.
+# Returns 1 when the library or its pattern status cannot be downloaded (the
+# caller builds from source instead), 2 when a downloaded file fails a check.
+fetch_prebuilt() {
+    local rc
+    PREBUILT_TMP="$(mktemp -d "${TMPDIR:-/tmp}/moon64-prebuilt.XXXXXX")" \
+        || { warn "cannot create a temporary directory"; return 1; }
+    trap 'rm -rf "$PREBUILT_TMP"' EXIT
+    fetch_prebuilt_into "$PREBUILT_TMP"
+    rc=$?
+    rm -rf "$PREBUILT_TMP"
+    trap - EXIT
+    return "$rc"
+}
+
+fetch_prebuilt_into() {
+    local tmp="$1" url="${SLSM_PREBUILT_URL:-${SLS64_PREBUILT_URL:-}}" got want="" info verified=no
+    [ -n "$url" ] || { warn "no prebuilt URL configured (SLSM_PREBUILT_URL)"; return 1; }
+    mkdir -p "$tmp/res" || return 1
+
+    dim "downloading the prebuilt SLSsteam.so: $url"
+    if ! curl -fsSL --connect-timeout 15 --max-time 300 -o "$tmp/SLSsteam.so" "$url" 2>/dev/null; then
+        warn "cannot download $url"
+        return 1
+    fi
+    if ! curl -fsSL --connect-timeout 15 --max-time 60 -o "$tmp/res/pattern-status.txt" "${url%/*}/pattern-status.txt" 2>/dev/null; then
+        warn "cannot download ${url%/*}/pattern-status.txt; the pattern gate needs it to accept a prebuilt"
+        return 1
+    fi
+
+    got="$(sha256sum "$tmp/SLSsteam.so" | cut -d' ' -f1)"
+    if curl -fsSL --connect-timeout 15 --max-time 60 -o "$tmp/SLSsteam.so.sha256" "$url.sha256" 2>/dev/null; then
+        read -r want _ < "$tmp/SLSsteam.so.sha256" || true
+        want="${want,,}"
+        if [ "${#want}" -ne 64 ] || [ -n "${want//[0-9a-f]/}" ]; then
+            bad "$url.sha256 does not hold a SHA-256 digest"
+            return 2
+        fi
+        if [ "$want" != "$got" ]; then
+            bad "prebuilt sha256 $got does not match the published $want"
+            return 2
+        fi
+        ok "prebuilt sha256 matches $url.sha256"
+        verified=yes
+    else
+        warn "no $url.sha256 published; the prebuilt's digest is not verified"
+    fi
+
+    info="$(file -b "$tmp/SLSsteam.so" 2>/dev/null || true)"
+    case "$info" in
+        'ELF 64-bit LSB shared object, x86-64'*) ;;
+        *) bad "prebuilt SLSsteam.so is not a 64-bit x86-64 shared object: ${info:-unreadable}"; return 2 ;;
+    esac
+
+    check_pattern_gate "$tmp" || { bad "refusing the prebuilt: its pattern table is incomplete"; return 2; }
+    probe_slssteam_deps "$tmp/SLSsteam.so"
+    install -m 755 "$tmp/SLSsteam.so" "$MOON_DIR/SLSsteam.so.64" || die "cannot stage SLSsteam.so.64"
+    write_sls64_state prebuilt "url=$url" "sha256_published=$verified"
+    return 0
+}
+
+# --- 1. SLSsteam 64-bit: prebuilt release or built from source ------------
+
+# The stack runs the pinned swwayps fork rather than AceSLS's release binary.
+# AceSLS's release is 64-bit and works, but it carries 6 feature modules and 17
+# patterns; this stack needs the fork's 79 modules (LuaTools stplug-in, Lumen
+# CEF-port contract, live appinfo provision, hot reload) and its 61 patterns.
+# By default it is built here from source; --prebuilt downloads the project's
+# own release build of the same fork instead. See versions.env.
 # shellcheck source=versions.env
 . "$HERE/versions.env"
 
@@ -501,76 +586,105 @@ fi
 # Prerequisites, checked up front and reported as one list. Packages are only
 # installed with --install-deps, and then only through a sudo that does not ask
 # for a password: the installer never prompts for root or uses it unasked.
-deps_req=(curl gcc g++ make readelf file ldd libcurl-headers openssl-headers)
-[ -f "$src_dir/Makefile" ] || deps_req+=(git)
+# --prebuilt defers the toolchain the source build needs until it is used.
+deps_base=(curl gcc readelf file ldd)
+deps_build=(g++ make libcurl-headers openssl-headers)
+[ -f "$src_dir/Makefile" ] || deps_build+=(git)
 deps_opt=()
 if [ ! -e "$SLS_DIR/SLSsteam.so.32" ] && { [ ! -f "$SLS_DIR/SLSsteam.so" ] || is_elf64 "$SLS_DIR/SLSsteam.so"; }; then
     deps_opt+=(bsdtar)
 fi
-check_deps "$install_deps" "${deps_req[@]}" -- "${deps_opt[@]}" || die "missing prerequisites"
-
-# Fetch the pinned checkout when it is not present. The fork is a public repo
-# cloned anonymously over HTTPS (the normal path); gh is only used as a
-# convenience when it is already authenticated. GIT_TERMINAL_PROMPT=0 keeps
-# plain git from stopping on a credential prompt in non-interactive runs.
-if [ ! -f "$src_dir/Makefile" ]; then
-    mkdir -p "$(dirname "$src_dir")" || die "cannot create $(dirname "$src_dir")"
-    dim "cloning $SLS64_REPO ($SLS64_REF) into $src_dir"
-
-    slug="${SLS64_REPO#https://github.com/}"
-    slug="${slug%.git}"
-
-    cloned=0
-    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
-        gh repo clone "$slug" "$src_dir" -- --depth 1 --branch "$SLS64_REF" >/dev/null 2>&1 && cloned=1
-    fi
-    if [ "$cloned" = 0 ]; then
-        GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$SLS64_REF" \
-            "$SLS64_REPO" "$src_dir" >/dev/null 2>&1 && cloned=1
-    fi
-    if [ "$cloned" = 0 ]; then
-        bad "cannot fetch SLSsteam fork: $slug (network error or missing SLS64_REF '$SLS64_REF')"
-        dim "  Option 1: clone it yourself and pass the path:"
-        dim "            git clone $SLS64_REPO \$HOME/slsteam-moon-64"
-        dim "            SLS64_SRC=\$HOME/slsteam-moon-64 ./install.sh"
-        dim "  Option 2: if you use gh, run 'gh auth login' and re-run."
-        die "no SLSsteam source available"
-    fi
-    ok "cloned $slug into $src_dir"
+if [ "$prebuilt" = 1 ]; then
+    check_deps "$install_deps" "${deps_base[@]}" -- "${deps_opt[@]}" || die "missing prerequisites"
 else
-    ok "using source at $src_dir"
+    check_deps "$install_deps" "${deps_base[@]}" "${deps_build[@]}" -- "${deps_opt[@]}" || die "missing prerequisites"
 fi
 
-# Refuse to stage a build whose required pattern table is not complete. A
-# missing required pattern makes Patterns::init() fail and SLSsteam aborts the
-# whole injection, so the client would start completely unpatched -- FakeAppIds
-# and everything else silently off. Staging that looks like success and is not.
-check_pattern_gate "$src_dir" || die "refusing to stage an incomplete build"
+sls64_path=""
+if [ "$prebuilt" = 1 ]; then
+    fetch_prebuilt
+    case $? in
+        0)  sls64_path="prebuilt (${SLSM_PREBUILT_URL:-$SLS64_PREBUILT_URL})" ;;
+        2)  die "refusing to stage an unverified prebuilt SLSsteam.so" ;;
+        *)  warn "no usable prebuilt SLSsteam.so; building from source instead"
+            dim "  a source build links against this host's glibc (the build needs >= 2.38)"
+            dim "  and the result only runs on hosts with at least that glibc"
+            check_deps "$install_deps" "${deps_build[@]}" || die "missing build prerequisites"
+            ;;
+    esac
+fi
 
-command -v pkg-config >/dev/null || dim "note: pkg-config not found; build may still work"
+if [ -z "$sls64_path" ]; then
+    # Fetch the pinned checkout when it is not present. The fork is a public
+    # repo cloned anonymously over HTTPS (the normal path); gh is only used as a
+    # convenience when it is already authenticated. GIT_TERMINAL_PROMPT=0 keeps
+    # plain git from stopping on a credential prompt in non-interactive runs.
+    if [ ! -f "$src_dir/Makefile" ]; then
+        mkdir -p "$(dirname "$src_dir")" || die "cannot create $(dirname "$src_dir")"
+        dim "cloning $SLS64_REPO ($SLS64_REF) into $src_dir"
 
-# Build host floor. The x86_64 source is C++20, and under C++20 glibc's own
-# <cstdlib> redirects strtol/strtoul/strtoll/strtoull to __isoc23_strto*,
-# which first shipped in glibc 2.38. Nothing in the fork calls strtol directly,
-# so there is no source-level opt-out: the build host must be >= 2.38 or the
-# link fails. Say that up front instead of letting make fail eight minutes in.
-host_glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
-if [ -n "$host_glibc" ]; then
-    # sort -V picks the older of the two, so equality with the floor means ok.
-    older="$(printf '%s\n%s\n' "$host_glibc" 2.38 | sort -V | head -1)"
-    if [ "$older" != 2.38 ]; then
-        die "this host has glibc $host_glibc; the x86_64 build needs >= 2.38 (C++20 __isoc23_strto*)"
+        slug="${SLS64_REPO#https://github.com/}"
+        slug="${slug%.git}"
+
+        cloned=0
+        if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+            gh repo clone "$slug" "$src_dir" -- --depth 1 --branch "$SLS64_REF" >/dev/null 2>&1 && cloned=1
+        fi
+        if [ "$cloned" = 0 ]; then
+            GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$SLS64_REF" \
+                "$SLS64_REPO" "$src_dir" >/dev/null 2>&1 && cloned=1
+        fi
+        if [ "$cloned" = 0 ]; then
+            bad "cannot fetch SLSsteam fork: $slug (network error or missing SLS64_REF '$SLS64_REF')"
+            dim "  Option 1: clone it yourself and pass the path:"
+            dim "            git clone $SLS64_REPO \$HOME/slsteam-moon-64"
+            dim "            SLS64_SRC=\$HOME/slsteam-moon-64 ./install.sh"
+            dim "  Option 2: if you use gh, run 'gh auth login' and re-run."
+            die "no SLSsteam source available"
+        fi
+        ok "cloned $slug into $src_dir"
+    else
+        ok "using source at $src_dir"
     fi
-    ok "build host glibc $host_glibc >= 2.38"
-fi
 
-# Build. ARCH is explicit so the 32-bit default of the fork is never used here.
-dim "building the 64-bit SLSsteam from $src_dir"
-( cd "$src_dir" && make ARCH=x86_64 -j"$(nproc 2>/dev/null || echo 2)" )     >"${TMPDIR:-/tmp}/moon64-build.log" 2>&1     || { tail -20 "${TMPDIR:-/tmp}/moon64-build.log" >&2; die "SLSsteam build failed (full log: ${TMPDIR:-/tmp}/moon64-build.log)"; }
-[ -f "$src_dir/bin/SLSsteam.so" ] || die "build produced no bin/SLSsteam.so"
-is_elf64 "$src_dir/bin/SLSsteam.so" || die "built SLSsteam.so is not 64-bit"
-probe_slssteam_deps "$src_dir/bin/SLSsteam.so"
-install -m 755 "$src_dir/bin/SLSsteam.so" "$MOON_DIR/SLSsteam.so.64" || die "cannot stage SLSsteam.so.64"
+    # Refuse to stage a build whose required pattern table is not complete. A
+    # missing required pattern makes Patterns::init() fail and SLSsteam aborts
+    # the whole injection, so the client would start completely unpatched --
+    # FakeAppIds and everything else silently off. Staging that looks like
+    # success and is not.
+    check_pattern_gate "$src_dir" || die "refusing to stage an incomplete build"
+
+    command -v pkg-config >/dev/null || dim "note: pkg-config not found; build may still work"
+
+    # Build host floor. The x86_64 source is C++20, and under C++20 glibc's own
+    # <cstdlib> redirects strtol/strtoul/strtoll/strtoull to __isoc23_strto*,
+    # which first shipped in glibc 2.38. Nothing in the fork calls strtol
+    # directly, so there is no source-level opt-out: the build host must be
+    # >= 2.38 or the link fails. Say that up front instead of letting make fail
+    # eight minutes in.
+    host_glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')"
+    if [ -n "$host_glibc" ]; then
+        # sort -V picks the older of the two, so equality with the floor means ok.
+        older="$(printf '%s\n%s\n' "$host_glibc" 2.38 | sort -V | head -1)"
+        if [ "$older" != 2.38 ]; then
+            die "this host has glibc $host_glibc; the x86_64 build needs >= 2.38 (C++20 __isoc23_strto*)"
+        fi
+        ok "build host glibc $host_glibc >= 2.38"
+    fi
+
+    # Build. ARCH is explicit so the 32-bit default of the fork is never used here.
+    dim "building the 64-bit SLSsteam from $src_dir"
+    ( cd "$src_dir" && make ARCH=x86_64 -j"$(nproc 2>/dev/null || echo 2)" ) \
+        >"${TMPDIR:-/tmp}/moon64-build.log" 2>&1 \
+        || { tail -20 "${TMPDIR:-/tmp}/moon64-build.log" >&2; die "SLSsteam build failed (full log: ${TMPDIR:-/tmp}/moon64-build.log)"; }
+    [ -f "$src_dir/bin/SLSsteam.so" ] || die "build produced no bin/SLSsteam.so"
+    is_elf64 "$src_dir/bin/SLSsteam.so" || die "built SLSsteam.so is not 64-bit"
+    probe_slssteam_deps "$src_dir/bin/SLSsteam.so"
+    install -m 755 "$src_dir/bin/SLSsteam.so" "$MOON_DIR/SLSsteam.so.64" || die "cannot stage SLSsteam.so.64"
+    src_commit="$(git -C "$src_dir" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    write_sls64_state built "src=$src_dir" "commit=$src_commit"
+    sls64_path="built from source ($src_dir @ $src_commit)"
+fi
 
 # libcurl is dlopen'd, not linked (src/curl.cpp:22), so it never shows up in
 # DT_NEEDED and probe_slssteam_deps cannot see it. Without a 64-bit
@@ -581,7 +695,7 @@ if ! case "$ldcache" in *libcurl.so.4*) true ;; *) false ;; esac; then
     warn "no libcurl.so.4 on this host; network features will be unavailable"
     dim "  install the 64-bit curl runtime (e.g. curl / libcurl4)"
 fi
-ok "staged $MOON_DIR/SLSsteam.so.64 (built from source)"
+ok "staged $MOON_DIR/SLSsteam.so.64: $sls64_path"
 
 # Stop Steam only after the gate and build succeed, right before touching live files.
 bash "$HERE/bin/moon64" stop-steam || die "cannot stop running Steam; close it manually and re-run"
@@ -764,5 +878,6 @@ fi
 # --- 6. report -------------------------------------------------------------
 printf '\n'
 ok "staging complete; nothing has been activated"
+ok "SLSsteam.so.64: $sls64_path"
 dim "verify:  $MOON_DIR/moon64 doctor"
 dim "switch:  $MOON_DIR/moon64 on     (undo: $MOON_DIR/moon64 off)"
