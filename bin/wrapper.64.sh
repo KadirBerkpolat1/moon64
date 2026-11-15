@@ -115,15 +115,56 @@ fi
 # SLSsteam starts making networking calls, then SLSsteam itself.
 AUDIT_LIST=""
 add_audit() { [ -f "$1" ] && AUDIT_LIST="${AUDIT_LIST:+$AUDIT_LIST:}$1"; }
-add_audit "$MOON_DIR/netsock64.so"
+netsock64_verified() {
+    local so="$MOON_DIR/netsock64.so" state="$MOON_DIR/netsock64.state"
+    local key val want="" got=""
+    [ -f "$so" ] || return 1
+    if [ -f "$state" ]; then
+        while IFS='=' read -r key val; do
+            [ "$key" = "sha256" ] && want="$val"
+        done < "$state"
+    fi
+    if [ -n "$want" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            got="$(sha256sum "$so" 2>/dev/null | cut -d' ' -f1)"
+        fi
+        if [ -z "$got" ] || [ "$got" != "$want" ]; then
+            if [ "${SLSM_ALLOW_UNVERIFIED_NETSOCK:-0}" = 1 ]; then
+                echo "moon64: SLSM_ALLOW_UNVERIFIED_NETSOCK=1 — loading unverified $so despite sha256 mismatch" >&2
+                return 0
+            fi
+            echo "moon64: skipping $so — sha256 mismatch against $state; P2P cert patch skipped (re-run install.sh or set SLSM_ALLOW_UNVERIFIED_NETSOCK=1)" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+netsock64_skipped=0
+if [ -f "$MOON_DIR/netsock64.so" ]; then
+    if netsock64_verified; then
+        add_audit "$MOON_DIR/netsock64.so"
+    else
+        netsock64_skipped=1
+    fi
+fi
 add_audit "$SLSDIR/SLSsteam.so"
 if [ -z "$AUDIT_LIST" ]; then
-    echo "moon64: neither netsock64.so nor SLSsteam.so found; refusing to start" >&2
+    if [ "$netsock64_skipped" = 1 ]; then
+        echo "moon64: netsock64.so was skipped (sha256 mismatch) and SLSsteam.so was not found; refusing to start" >&2
+    else
+        echo "moon64: neither netsock64.so nor SLSsteam.so found; refusing to start" >&2
+    fi
     exit 1
 fi
 case ":$AUDIT_LIST:" in
     *netsock64*) log "netsock64 active" ;;
-    *) log "netsock64 missing — P2P cert patch inactive" ;;
+    *)
+        if [ "$netsock64_skipped" = 1 ]; then
+            log "netsock64 skipped (sha256 mismatch) — P2P cert patch inactive"
+        else
+            log "netsock64 missing — P2P cert patch inactive"
+        fi
+        ;;
 esac
 if [ -n "$SLSM_INHERITED_AUDIT" ]; then
     export LD_AUDIT="$AUDIT_LIST:$SLSM_INHERITED_AUDIT"

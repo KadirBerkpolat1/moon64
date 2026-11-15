@@ -281,5 +281,33 @@ assert_contains "d3: says so" "gcc is not installed to build it; keeping the net
 assert_contains "d3: summary: a kept netsock64.so is a warn" $'\n warn  netsock64.so: kept from an earlier install' "$out"
 assert_not_contains "d3: summary: not ok" $'\n  ok   netsock64.so:' "$out"
 
+
+# --- (e) tampered netsock64.so: doctor flags it, on refuses, wrapper skips -
+rel="$(make_release e)"
+sb="$(make_sandbox e)"
+out="$(run "$sb" "$rel" bash "$REPO_ROOT/install.sh" --prebuilt 2>&1)"; rc=$?
+assert_rc "e1: fresh prebuilt install succeeds" 0 "$rc" "$out"
+printf '\0' >> "$sb/moon64/netsock64.so"
+
+doc_out="$(run "$sb" "$rel" bash "$sb/moon64/moon64" doctor 2>&1)"; rc=$?
+assert_rc "e2: doctor exits 1 on mismatched netsock64.so" 1 "$rc" "$doc_out"
+assert_contains "e2: doctor names the mismatch and refusal" "netsock64.so changed since install.sh recorded it" "$doc_out"
+
+on_out="$(run "$sb" "$rel" bash "$sb/moon64/moon64" on 2>&1)"; rc=$?
+assert_rc "e3: on refuses mismatched netsock64.so" 1 "$rc" "$on_out"
+assert_contains "e3: on tells the user how to fix or override" "SLSM_ALLOW_UNVERIFIED_NETSOCK=1" "$on_out"
+assert_absent "e3: on mutated no desktop override" "$sb/home/.local/share/applications/steam.desktop"
+assert_absent "e3: on installed no wrapper" "$sb/home/.local/share/SLSsteam/path/steam"
+
+on_ovr="$(run "$sb" "$rel" env SLSM_ALLOW_UNVERIFIED_NETSOCK=1 bash "$sb/moon64/moon64" on 2>&1)"; rc=$?
+assert_rc "e4: SLSM_ALLOW_UNVERIFIED_NETSOCK=1 overrides on refusal" 0 "$rc" "$on_ovr"
+assert_contains "e4: override warns loudly" "SLSM_ALLOW_UNVERIFIED_NETSOCK=1: activating with unverified" "$on_ovr"
+
+wrap_out="$(run "$sb" "$rel" bash "$sb/home/.local/share/SLSsteam/path/steam" steam://open/main 2>&1)"; rc=$?
+assert_rc "e5: wrapper still starts Steam without the mismatched netsock64.so" 0 "$rc" "$wrap_out"
+assert_contains "e5: wrapper logs that netsock64 was skipped" "P2P cert patch skipped" "$wrap_out"
+audit_e5="$(sed -n 's/^LD_AUDIT=//p' "$sb/launch.log" 2>/dev/null)"
+assert_not_contains "e5: LD_AUDIT excludes mismatched netsock64.so" "netsock64.so" "$audit_e5"
+assert_contains "e5: LD_AUDIT still carries SLSsteam.so" "$sb/home/.local/share/SLSsteam/SLSsteam.so" "$audit_e5"
 printf 'Summary: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
