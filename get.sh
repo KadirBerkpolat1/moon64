@@ -80,7 +80,7 @@ get_cleanup() {
 # get_cert_patch <moon dir> - one or two lines on the P2P cert patch, from the
 # netsock64.so the wrapper will put on LD_AUDIT and install.sh's record of it.
 get_cert_patch() {
-    local so="$1/netsock64.so" state="$1/netsock64.state" key val src="" sha=""
+    local so="$1/netsock64.so" state="$1/netsock64.state" key val src="" sha="" got=""
     if [ ! -f "$so" ]; then
         printf 'P2P cert patch: INACTIVE - co-op joins that need peer-to-peer (Satisfactory, REPO) will fail.\n'
         printf '                install gcc and run this again to build it, or wait for a release that ships netsock64.so.\n'
@@ -94,13 +94,27 @@ get_cert_patch() {
             esac
         done < "$state"
     fi
-    [ "$sha" = "$(sha256sum "$so" | cut -d' ' -f1)" ] || src=""
-    case "$src" in
-        prebuilt) src="netsock64.so from the release" ;;
-        built)    src="netsock64.so built from source" ;;
-        *)        src="netsock64.so of unrecorded origin" ;;
-    esac
-    printf 'P2P cert patch: active once you run moon64 on (%s)\n' "$src"
+    if [ -n "$sha" ]; then
+        got="$(sha256sum "$so" 2>/dev/null | cut -d' ' -f1)"
+        if [ -n "$got" ] && [ "$sha" = "$got" ]; then
+            case "$src" in
+                prebuilt)
+                    printf 'P2P cert patch: active once you run moon64 on (netsock64.so from the release)\n'
+                    return 0
+                    ;;
+                built)
+                    printf 'P2P cert patch: active once you run moon64 on (netsock64.so built from source)\n'
+                    return 0
+                    ;;
+            esac
+        else
+            printf 'P2P cert patch: UNVERIFIED - netsock64.so changed since install.sh recorded it; re-run the installer to restage it.\n'
+            printf '                co-op joins that need peer-to-peer will fail if that file is not the cert patch.\n'
+            return 0
+        fi
+    fi
+    printf 'P2P cert patch: UNVERIFIED - no install record for netsock64.so; re-run the installer to verify it.\n'
+    printf '                co-op joins that need peer-to-peer will fail if that file is not the cert patch.\n'
 }
 
 main() {

@@ -266,6 +266,30 @@ assert_not_contains "c1: close: not inactive" "P2P cert patch: INACTIVE" "$out"
 assert_absent "c1: no desktop override" "$sb/home/.local/share/applications/steam.desktop"
 assert_absent "c1: no sudo" "$sb/sudo.log"
 assert_eq "c1: temporary files removed" "" "$(ls -A "$sb/tmp")"
+cert_line_active="$(sed -n '/^P2P cert patch:/p' <<< "$out")"
+
+# --- (c2/c3) tampered netsock64.so & missing netsock64.state fail closed ---
+printf '\0' >> "$MD/netsock64.so"
+out_changed="$(GETSH_RELEASE="$REL_ABSENT" pipe_get "$sb" 2>&1)"; rc=$?
+assert_rc "c2: re-run without gcc after netsock64.so change exits 0" 0 "$rc" "$out_changed"
+assert_contains "c2: close: UNVERIFIED when sha256 mismatches" "P2P cert patch: UNVERIFIED - netsock64.so changed since install.sh recorded it; re-run the installer to restage it." "$out_changed"
+assert_contains "c2: close: warns P2P joins will fail" "co-op joins that need peer-to-peer will fail if that file is not the cert patch." "$out_changed"
+assert_not_contains "c2: close: never claims active on mismatch" "P2P cert patch: active" "$out_changed"
+cert_line_changed="$(sed -n '/^P2P cert patch:/p' <<< "$out_changed")"
+
+rm -f "$MD/netsock64.state"
+out_nostate="$(GETSH_RELEASE="$REL_ABSENT" pipe_get "$sb" 2>&1)"; rc=$?
+assert_rc "c3: re-run without gcc after deleting netsock64.state exits 0" 0 "$rc" "$out_nostate"
+assert_contains "c3: close: UNVERIFIED when state missing" "P2P cert patch: UNVERIFIED - no install record for netsock64.so; re-run the installer to verify it." "$out_nostate"
+assert_contains "c3: close: warns P2P joins will fail" "co-op joins that need peer-to-peer will fail if that file is not the cert patch." "$out_nostate"
+assert_not_contains "c3: close: never claims active without state" "P2P cert patch: active" "$out_nostate"
+cert_line_nostate="$(sed -n '/^P2P cert patch:/p' <<< "$out_nostate")"
+
+printf 'source=built\n' > "$MD/netsock64.state"
+out_nosha="$(GETSH_RELEASE="$REL_ABSENT" pipe_get "$sb" 2>&1)"; rc=$?
+assert_rc "c4: re-run without gcc when state lacks sha256 exits 0" 0 "$rc" "$out_nosha"
+assert_contains "c4: close: UNVERIFIED when state has no sha256" "P2P cert patch: UNVERIFIED - no install record for netsock64.so; re-run the installer to verify it." "$out_nosha"
+assert_not_contains "c4: close: never claims active without sha256" "P2P cert patch: active" "$out_nosha"
 
 # --- (d) MOON64_REF, MOON64_DIR and SLSM_PREBUILT_URL are respected -----------
 sb="$(make_sandbox d)"
@@ -373,6 +397,11 @@ assert_contains "h2: close: cert patch inactive, and what gcc or a release would
 assert_not_contains "h2: close: never claims the patch is active" "P2P cert patch: active" "$out"
 assert_absent "h2: no netsock64.so" "$MD/netsock64.so"
 assert_same "h2: SLSsteam.so.64 is the release's" "$REL_ABSENT/SLSsteam.so" "$MD/SLSsteam.so.64"
+cert_line_inactive="$(sed -n '/^P2P cert patch:/p' <<< "$out")"
+distinct_cert_lines="$(printf '%s\n%s\n%s\n%s\n' \
+    "$cert_line_inactive" "$cert_line_active" "$cert_line_changed" "$cert_line_nostate" \
+    | sort -u | wc -l)"
+assert_eq "h2: all 4 cert-patch states emit distinct lines" "4" "$distinct_cert_lines"
 
 # --- (i) through the pipe, a release whose pattern-status.txt names a
 # netsock64.so that is not there: a hard refusal, nothing staged ---------------
