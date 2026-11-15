@@ -191,9 +191,14 @@ static void patch_one(const char *name)
 static int is_steam_process(void)
 {
     char buf[64];
-    ssize_t n = readlink("/proc/self/comm", buf, sizeof buf - 1);
-    if (n <= 0) return 0;
+    FILE* f = fopen("/proc/self/comm", "r");
+    if (f == NULL) return 0;
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    if (n == 0) return 0;
     buf[n] = '\0';
+    char* nl = strchr(buf, '\n');
+    if (nl != NULL) *nl = '\0';
     return strncmp(buf, "steam", 5) == 0;
 }
 
