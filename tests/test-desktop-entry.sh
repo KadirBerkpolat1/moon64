@@ -47,6 +47,8 @@ assert_absent() {
 exec_lines() { sed -n 's/^Exec=//p' "$1"; }
 # Everything except Exec= lines, byte-for-byte (CR and missing final newline kept).
 non_exec() { awk 'BEGIN { RS = "\n"; ORS = "\n" } !/^Exec=/' "$1"; }
+# Every file under the given dirs with its sha256, for whole-tree comparisons.
+tree_digest() { find "$@" -type f -exec sha256sum {} + | sort -k2; }
 
 make_elf() {
     local bits="$1" out="$2"
@@ -134,6 +136,8 @@ assert_same "a1: system entry untouched" "$sys" "$sb/system.pristine"
 assert_eq "a1: every Exec= runs the wrapper" \
     "$wrap %U"$'\n'"$wrap steam://store"$'\n'"$wrap steam://open/games" "$(exec_lines "$user")"
 assert_eq "a1: all other lines byte-identical" "$(non_exec "$sys" | od -c)" "$(non_exec "$user" | od -c)"
+assert_contains "a1: on recorded the bytes it wrote" "$(sha256sum < "$user" | cut -d' ' -f1)"$'\t'"$user" \
+    "$(cat "$sb/moon64/desktop.state" 2>/dev/null)"
 
 cp -a "$user" "$sb/after-first-on"
 out="$(run_moon "$sb" "$h" on)"; rc=$?
@@ -152,6 +156,7 @@ assert_contains "a4: off reports removing the override" "removed the moon64 over
 assert_absent "a4: override removed" "$user"
 assert_absent "a4: marker removed" "$user.moon64-created"
 assert_same "a4: system entry still untouched" "$sys" "$sb/system.pristine"
+assert_absent "a4: desktop.state cleared" "$sb/moon64/desktop.state"
 
 out="$(run_moon "$sb" "$h" doctor)"
 assert_contains "a5: doctor after off explains what on will do" "$sys runs /usr/bin/steam; 'moon64 on' points it at $wrap" "$out"
@@ -195,6 +200,7 @@ assert_rc "b3: off succeeds" 0 "$rc" "$out"
 assert_contains "b3: off reports the restore" "desktop entry: $user restored (byte-exact)" "$out"
 assert_same "b3: entry restored byte-for-byte" "$user" "$sb/user.pristine"
 assert_absent "b3: backup consumed" "$user.moon64-bak"
+assert_absent "b3: desktop.state cleared" "$sb/moon64/desktop.state"
 
 # --- (c) a pre-existing backup is never replaced --------------------------
 sb="$(make_sandbox c-oldbak)"; h="$sb/home"
@@ -273,6 +279,69 @@ assert_same "h2: quoted entry recognised as ours on re-run" "$user" "$sb/after-f
 out="$(run_moon "$sb" "$h" off)"; rc=$?
 assert_rc "h3: off succeeds" 0 "$rc" "$out"
 assert_absent "h3: override removed" "$user"
+
+# --- (i) override replaced by the user after on: off keeps it -------------
+sb="$(make_sandbox i-replaced)"; h="$sb/home"
+user="$h/.local/share/applications/steam.desktop"
+write_system_entry "$sb/usr/share/applications/steam.desktop"
+out="$(run_moon "$sb" "$h" on)"; rc=$?
+assert_rc "i1: on succeeds" 0 "$rc" "$out"
+assert_exists "i1: override marker recorded" "$user.moon64-created"
+printf '[Desktop Entry]\nName=Steam (my GPU tweak)\nExec=env DXVK_HUD=1 /usr/bin/steam -silent %%U\nType=Application\n' > "$user"
+cp -a "$user" "$sb/user.mine"
+out="$(run_moon "$sb" "$h" doctor)"
+assert_contains "i2: doctor says off keeps the user's version" "changed since 'moon64 on'; 'moon64 off' keeps this version" "$out"
+out="$(run_moon "$sb" "$h" off)"; rc=$?
+assert_rc "i3: off succeeds" 0 "$rc" "$out"
+assert_contains "i3: off warns that it kept the user's file" \
+    "desktop entry: $user was changed after 'moon64 on'; kept your version" "$out"
+assert_same "i3: user file still there, byte-identical" "$user" "$sb/user.mine"
+assert_absent "i3: marker consumed" "$user.moon64-created"
+assert_absent "i3: desktop.state cleared" "$sb/moon64/desktop.state"
+before="$(tree_digest "$h" "$sb/moon64")"
+out="$(run_moon "$sb" "$h" off)"; rc=$?
+assert_rc "i4: second off succeeds" 0 "$rc" "$out"
+assert_same "i4: user file untouched by a second off" "$user" "$sb/user.mine"
+assert_eq "i4: second off changes no file" "$before" "$(tree_digest "$h" "$sb/moon64")"
+case "$out" in
+    *"desktop entry"*) fail "i4: second off says nothing about the desktop entry" "$out" ;;
+    *) pass "i4: second off says nothing about the desktop entry" ;;
+esac
+
+# --- (j) backed-up entry replaced by the user after on: off keeps it ------
+sb="$(make_sandbox j-bak-replaced)"; h="$sb/home"
+user="$h/.local/share/applications/steam.desktop"
+mkdir -p "$h/.local/share/applications"
+printf '[Desktop Entry]\nName=Steam\nExec=/usr/bin/steam %%U\n' > "$user"
+out="$(run_moon "$sb" "$h" on)"; rc=$?
+assert_rc "j1: on succeeds" 0 "$rc" "$out"
+assert_exists "j1: original saved" "$user.moon64-bak"
+printf '[Desktop Entry]\nName=Steam (my GPU tweak)\nExec=env DXVK_HUD=1 /usr/bin/steam -silent %%U\nType=Application\n' > "$user"
+cp -a "$user" "$sb/user.mine"
+out="$(run_moon "$sb" "$h" off)"; rc=$?
+assert_rc "j2: off succeeds" 0 "$rc" "$out"
+assert_contains "j2: off warns that it kept the user's file" \
+    "desktop entry: $user was changed after 'moon64 on'; kept your version" "$out"
+assert_same "j2: backup not copied over the user's file" "$user" "$sb/user.mine"
+assert_absent "j2: backup consumed" "$user.moon64-bak"
+before="$(tree_digest "$h" "$sb/moon64")"
+out="$(run_moon "$sb" "$h" off)"; rc=$?
+assert_rc "j3: second off succeeds" 0 "$rc" "$out"
+assert_eq "j3: second off changes no file" "$before" "$(tree_digest "$h" "$sb/moon64")"
+
+# --- (k) Steam package updates the system entry: our override still goes ---
+sb="$(make_sandbox k-sys-updated)"; h="$sb/home"
+sys="$sb/usr/share/applications/steam.desktop"
+user="$h/.local/share/applications/steam.desktop"
+write_system_entry "$sys"
+out="$(run_moon "$sb" "$h" on)"; rc=$?
+assert_rc "k1: on succeeds" 0 "$rc" "$out"
+printf 'Keywords=Games;Valve;\n' >> "$sys"
+out="$(run_moon "$sb" "$h" off)"; rc=$?
+assert_rc "k2: off succeeds" 0 "$rc" "$out"
+assert_contains "k2: off removes its own override" "removed the moon64 override $user" "$out"
+assert_absent "k2: override removed" "$user"
+assert_absent "k2: marker removed" "$user.moon64-created"
 
 printf 'Summary: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -782,6 +782,46 @@ desktop_targets() {
     done
 }
 
+# $DESKTOP_STATE holds "<sha256>\t<path>" for every desktop entry `on` wrote.
+# `off` restores or removes an entry only while it still has those bytes. The
+# bytes cannot be recomputed at `off` time: an override is rewritten from the
+# system entry, which changes with every Steam package update.
+DESKTOP_STATE="$MOON_DIR/desktop.state"
+
+desktop_sum() {
+    local s
+    s="$(sha256sum < "$1" 2>/dev/null)" || return 1
+    printf '%s' "${s%% *}"
+}
+
+# desktop_record <path> [sha256] - remember <path>'s bytes, or forget it.
+desktop_record() {
+    local s p tmp="$DESKTOP_STATE.tmp"
+    {
+        if [ -f "$DESKTOP_STATE" ]; then
+            while IFS=$'\t' read -r s p; do
+                [ -z "$p" ] || [ "$p" = "$1" ] || printf '%s\t%s\n' "$s" "$p"
+            done < "$DESKTOP_STATE"
+        fi
+        [ -z "${2:-}" ] || printf '%s\t%s\n' "$2" "$1"
+    } > "$tmp" || return 1
+    if [ -s "$tmp" ]; then
+        mv -f "$tmp" "$DESKTOP_STATE"
+    else
+        rm -f "$tmp" "$DESKTOP_STATE"
+    fi
+}
+
+# desktop_is_ours <path> - true while <path> holds exactly the bytes `on` wrote.
+desktop_is_ours() {
+    local s p got
+    [ -f "$DESKTOP_STATE" ] && got="$(desktop_sum "$1")" || return 1
+    while IFS=$'\t' read -r s p; do
+        [ "$p" = "$1" ] && [ "$s" = "$got" ] && return 0
+    done < "$DESKTOP_STATE"
+    return 1
+}
+
 # --- two-phase transaction rollback ----------------------------------------
 TX_ACTIVE=0
 TX_RB_DIR=""
@@ -908,7 +948,7 @@ cmd_on() {
     local wrapper_absent="$MOON_DIR/wrapper.absent" markers_pre="$MOON_DIR/client-markers.pre-on"
     local env_saved="$MOON_DIR/steam-32bit.conf.32"
     local env_absent="$MOON_DIR/steam-32bit.conf.absent"
-    local stage_cr=0 stage_cr_cli=0 dt_dst dt_src k dt_ours=0
+    local stage_cr=0 stage_cr_cli=0 dt_dst dt_src dt_sum k dt_ours=0
     local -a dt_user=()
 
     cmd_stop_steam || exit 1
@@ -1020,6 +1060,8 @@ CONF
     sync_systemd_env "steamrt64"
     for k in "${!dt_user[@]}"; do
         atomic_copy_preserve "$STAGE_DIR/desktop.$k" "${dt_user[k]}" || die "cannot update ${dt_user[k]}"
+        dt_sum="$(desktop_sum "${dt_user[k]}")" || die "cannot hash ${dt_user[k]}"
+        desktop_record "${dt_user[k]}" "$dt_sum" || die "cannot record ${dt_user[k]} in $DESKTOP_STATE"
     done
 
     # Post-commit ELF verification
@@ -1143,16 +1185,28 @@ CONF
     fi
 
     # Desktop entries: back to the saved original, or drop the override `on`
-    # created. An entry that already started the wrapper before `on` is left.
+    # created, but only while the entry still holds the bytes `on` wrote; one
+    # changed since then is the user's and is kept. An entry that already
+    # started the wrapper before `on` has no marker and is left.
     for dt in "${STEAM_DESKTOP_NAMES[@]}"; do
         dt="$APPS_DIR/$dt"
         k="${#dr_user[@]}"
         if [ -f "$dt.moon64-bak" ]; then
+            if [ -e "$dt" ] && ! desktop_is_ours "$dt" && ! cmp -s "$dt" "$dt.moon64-bak"; then
+                dr_user+=("$dt"); dr_mode+=(keep)
+                continue
+            fi
             cp -a "$dt.moon64-bak" "$STAGE_DIR/desktop.$k" || die "cannot stage $dt.moon64-bak"
             cmp -s "$STAGE_DIR/desktop.$k" "$dt.moon64-bak" || die "staged $dt byte mismatch"
             dr_user+=("$dt"); dr_mode+=(restore)
         elif [ -e "$dt.moon64-created" ]; then
-            dr_user+=("$dt"); dr_mode+=(remove)
+            if [ ! -e "$dt" ]; then
+                dr_user+=("$dt"); dr_mode+=(gone)
+            elif desktop_is_ours "$dt"; then
+                dr_user+=("$dt"); dr_mode+=(remove)
+            else
+                dr_user+=("$dt"); dr_mode+=(keep)
+            fi
         fi
     done
 
@@ -1229,6 +1283,7 @@ CONF
     tx_commit_done
     for k in "${!dr_user[@]}"; do
         rm -f "${dr_user[k]}.moon64-bak" "${dr_user[k]}.moon64-created"
+        desktop_record "${dr_user[k]}" || warn "cannot drop ${dr_user[k]} from $DESKTOP_STATE"
     done
     [ "$wrap_action" = remove ] && rmdir "${wrapper%/*}" 2>/dev/null
 
@@ -1263,6 +1318,9 @@ CONF
                 ok "desktop entry: removed the moon64 override ${dr_user[k]}"
                 system_desktop_file "${dr_user[k]##*/}" >/dev/null \
                     || warn "Steam's own ${dr_user[k]##*/} is gone as well; no Steam desktop entry remains"
+                ;;
+            keep)
+                warn "desktop entry: ${dr_user[k]} was changed after 'moon64 on'; kept your version"
                 ;;
         esac
     done
@@ -1587,8 +1645,13 @@ check_desktop_entries() {
                 [ "$src" = "$f" ] || dim "  system entry: 'moon64 on' writes a user-level override to $f"
                 ;;
         esac
-        [ -f "$f.moon64-bak" ] && dim "  original saved as $f.moon64-bak ('moon64 off' restores it)"
-        [ -e "$f.moon64-created" ] && dim "  user-level override created by moon64 ('moon64 off' removes it)"
+        if { [ -f "$f.moon64-bak" ] || [ -e "$f.moon64-created" ]; } && [ -e "$f" ] \
+            && ! desktop_is_ours "$f" && ! { [ -f "$f.moon64-bak" ] && cmp -s "$f" "$f.moon64-bak"; }; then
+            dim "  changed since 'moon64 on'; 'moon64 off' keeps this version"
+        else
+            [ -f "$f.moon64-bak" ] && dim "  original saved as $f.moon64-bak ('moon64 off' restores it)"
+            [ -e "$f.moon64-created" ] && dim "  user-level override created by moon64 ('moon64 off' removes it)"
+        fi
     done
     [ "$found" = 1 ] || warn "no Steam desktop entry in $APPS_DIR or \$XDG_DATA_DIRS; start Steam with $SLS_WRAPPER"
     return "$problems"
