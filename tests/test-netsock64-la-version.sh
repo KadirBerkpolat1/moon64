@@ -102,27 +102,70 @@ EOF
         else
             fail "probe: compile host probe" "gcc failed"
         fi
-        cp "$PROBE_BIN" "$TMP_ROOT/steam"
-        cp "$PROBE_BIN" "$TMP_ROOT/notsteam"
 
-        # A real $HOME exists; only .cache may be absent.  Provide the home
-        # dir but leave .cache missing so the shim's own mkdir of .cache (and
-        # .cache/moon64) is what creates the log path.
-        mkdir -p "$TMP_ROOT/home-steam"
-        HOME="$TMP_ROOT/home-steam" LD_AUDIT="$SO" "$TMP_ROOT/steam" >/dev/null 2>&1
-        steam_log="$TMP_ROOT/home-steam/.cache/moon64/netsock.log"
-        if [ -f "$steam_log" ] && grep -Fq 'audit loaded, la_version ' "$steam_log"; then
-            pass "probe: steam-named host writes audit loaded log line"
-        else
-            fail "probe: steam-named host writes audit loaded log line" "missing or empty log: $steam_log"
-        fi
+        # Gate checks: a host that dlopens a library named steamclient.so, so
+        # la_objopen sees the same object a Steam client or a game loading
+        # ~/.steam/sdk64/steamclient.so would.  Copied as "steam" and
+        # "notsteam" to flip is_steam_process().
+        LOADER_SRC="$TMP_ROOT/loader.c"
+        LOADER_BIN="$TMP_ROOT/loader"
+        cat > "$LOADER_SRC" <<'EOF'
+#include <dlfcn.h>
+#include <stdio.h>
 
-        HOME="$TMP_ROOT/home-other" LD_AUDIT="$SO" "$TMP_ROOT/notsteam" >/dev/null 2>&1
-        other_log="$TMP_ROOT/home-other/.cache/moon64/netsock.log"
-        if [ ! -e "$other_log" ]; then
-            pass "probe: non-steam host does not write audit loaded log"
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        return 1;
+    }
+    void *h = dlopen(argv[1], RTLD_NOW);
+    if (!h) {
+        fprintf(stderr, "dlopen failed: %s\n", dlerror());
+        return 2;
+    }
+    dlclose(h);
+    return 0;
+}
+EOF
+        mkdir -p "$TMP_ROOT/fake"
+        FAKE_CLIENT="$TMP_ROOT/fake/steamclient.so"
+        printf 'int moon64_fake_steamclient = 1;\n' > "$TMP_ROOT/fake/steamclient.c"
+        if gcc -O2 -Wall -Wextra -o "$LOADER_BIN" "$LOADER_SRC" -ldl \
+            && gcc -shared -fPIC -o "$FAKE_CLIENT" "$TMP_ROOT/fake/steamclient.c"; then
+            cp "$LOADER_BIN" "$TMP_ROOT/steam"
+            cp "$LOADER_BIN" "$TMP_ROOT/notsteam"
+
+            # A real $HOME exists; only .cache may be absent.  Provide both home
+            # dirs but leave .cache missing so the shim's own mkdir of .cache
+            # (and .cache/moon64) is what creates the log path: a non-steam
+            # process that slips past the gate would create it too.
+            mkdir -p "$TMP_ROOT/home-steam" "$TMP_ROOT/home-other"
+
+            HOME="$TMP_ROOT/home-steam" LD_AUDIT="$SO" "$TMP_ROOT/steam" "$FAKE_CLIENT" >/dev/null 2>&1
+            steam_rc=$?
+            steam_log="$TMP_ROOT/home-steam/.cache/moon64/netsock.log"
+            if [ "$steam_rc" -eq 0 ] && [ -f "$steam_log" ] && grep -Fq 'audit loaded, la_version ' "$steam_log"; then
+                pass "probe: steam-named host writes audit loaded log line"
+            else
+                fail "probe: steam-named host writes audit loaded log line" "rc=$steam_rc, missing or empty log: $steam_log"
+            fi
+            if [ -f "$steam_log" ] && grep -Fq "steamclient.so opened: $FAKE_CLIENT" "$steam_log"; then
+                pass "probe: steam-named host scans an opened steamclient.so"
+            else
+                fail "probe: steam-named host scans an opened steamclient.so" "no 'steamclient.so opened' line in $steam_log"
+            fi
+
+            HOME="$TMP_ROOT/home-other" LD_AUDIT="$SO" "$TMP_ROOT/notsteam" "$FAKE_CLIENT" >/dev/null 2>&1
+            other_rc=$?
+            other_log="$TMP_ROOT/home-other/.cache/moon64/netsock.log"
+            if [ "$other_rc" -ne 0 ]; then
+                fail "probe: non-steam host opening steamclient.so leaves no log" "loader rc=$other_rc, gate not exercised"
+            elif [ -e "$other_log" ]; then
+                fail "probe: non-steam host opening steamclient.so leaves no log" "unexpected log: $other_log"
+            else
+                pass "probe: non-steam host opening steamclient.so leaves no log"
+            fi
         else
-            fail "probe: non-steam host does not write audit loaded log" "unexpected log: $other_log"
+            fail "probe: compile gate loader and fake steamclient.so" "gcc failed"
         fi
     fi
 else
