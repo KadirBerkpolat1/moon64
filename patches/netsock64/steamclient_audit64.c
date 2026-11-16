@@ -208,12 +208,11 @@ static void patch_one(const char *name, int quiet)
     logf_("patched steamclient.so at %p -> mov eax,1; ret", (void *)target);
 }
 
-// The shim is inherited by every process the launcher spawns (steam.sh runs
-// mkdir/ln/readlink before exec'ing the client).  Those helpers never open a
-// steamclient.so, so they cannot patch anything -- but their la_version would
-// still append an "audit loaded" line, turning the log into noise.  Gate the
-// logging on the process actually being the Steam client, the same test
-// SLSsteam uses (process name == "steam").
+// The shim is inherited by every process the launcher spawns: steam.sh's
+// mkdir/ln/readlink helpers, and every game and Proton process, which can
+// load ~/.steam/sdk64/steamclient.so themselves.  Only the Steam client may
+// log, scan or patch; everything else must leave memory and the log alone.
+// Same test SLSsteam uses (process name == "steam").
 static int is_steam_process(void)
 {
     char buf[64];
@@ -257,9 +256,8 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie)
     (void)cookie;
     const char *name = map->l_name;
     if (!name || !*name) return 0;
-    int is_steam_obj = strstr(name, "steam") != NULL;
-    if (is_steam_obj && is_steam_process())
-        logf_("objopen: %s", name);
+    if (!strstr(name, "steam") || !is_steam_process()) return 0;
+    logf_("objopen: %s", name);
     if (strcmp(base_name(name), "steamclient.so") == 0) {
         // Immediate path: steamclient.so opened in our own namespace.
         logf_("steamclient.so opened: %s", name);
@@ -270,7 +268,6 @@ unsigned int la_objopen(struct link_map *map, Lmid_t lmid, uintptr_t *cookie)
     // namespace whose la_objopen never reaches us, but /proc/self/maps spans
     // all namespaces.  Re-scan on each later steam-object open and patch once
     // it appears (quiet until found; patch_one self-guards to a single scan).
-    if (is_steam_obj)
-        patch_one("objscan", 1);
+    patch_one("objscan", 1);
     return 0;
 }
