@@ -105,8 +105,10 @@ EOF
 
         # Gate checks: a host that dlopens a library named steamclient.so, so
         # la_objopen sees the same object a Steam client or a game loading
-        # ~/.steam/sdk64/steamclient.so would.  Copied as "steam" and
-        # "notsteam" to flip is_steam_process().
+        # ~/.steam/sdk64/steamclient.so would.  Copied as "steam" and as
+        # non-Steam names, including ones that only start with "steam" (Proton's
+        # steam.exe, steamwebhelper, the launcher script), to flip
+        # is_steam_process().
         LOADER_SRC="$TMP_ROOT/loader.c"
         LOADER_BIN="$TMP_ROOT/loader"
         cat > "$LOADER_SRC" <<'EOF'
@@ -132,13 +134,17 @@ EOF
         if gcc -O2 -Wall -Wextra -o "$LOADER_BIN" "$LOADER_SRC" -ldl \
             && gcc -shared -fPIC -o "$FAKE_CLIENT" "$TMP_ROOT/fake/steamclient.c"; then
             cp "$LOADER_BIN" "$TMP_ROOT/steam"
-            cp "$LOADER_BIN" "$TMP_ROOT/notsteam"
+            OTHER_NAMES=(notsteam steam.exe steamwebhelper steam.sh)
+            mkdir -p "$TMP_ROOT/other"
+            for name in "${OTHER_NAMES[@]}"; do
+                cp "$LOADER_BIN" "$TMP_ROOT/other/$name"
+            done
 
-            # A real $HOME exists; only .cache may be absent.  Provide both home
-            # dirs but leave .cache missing so the shim's own mkdir of .cache
+            # A real $HOME exists; only .cache may be absent.  Provide every home
+            # dir but leave .cache missing so the shim's own mkdir of .cache
             # (and .cache/moon64) is what creates the log path: a non-steam
             # process that slips past the gate would create it too.
-            mkdir -p "$TMP_ROOT/home-steam" "$TMP_ROOT/home-other"
+            mkdir -p "$TMP_ROOT/home-steam"
 
             HOME="$TMP_ROOT/home-steam" LD_AUDIT="$SO" "$TMP_ROOT/steam" "$FAKE_CLIENT" >/dev/null 2>&1
             steam_rc=$?
@@ -154,16 +160,21 @@ EOF
                 fail "probe: steam-named host scans an opened steamclient.so" "no 'steamclient.so opened' line in $steam_log"
             fi
 
-            HOME="$TMP_ROOT/home-other" LD_AUDIT="$SO" "$TMP_ROOT/notsteam" "$FAKE_CLIENT" >/dev/null 2>&1
-            other_rc=$?
-            other_log="$TMP_ROOT/home-other/.cache/moon64/netsock.log"
-            if [ "$other_rc" -ne 0 ]; then
-                fail "probe: non-steam host opening steamclient.so leaves no log" "loader rc=$other_rc, gate not exercised"
-            elif [ -e "$other_log" ]; then
-                fail "probe: non-steam host opening steamclient.so leaves no log" "unexpected log: $other_log"
-            else
-                pass "probe: non-steam host opening steamclient.so leaves no log"
-            fi
+            for name in "${OTHER_NAMES[@]}"; do
+                other_home="$TMP_ROOT/home-other-$name"
+                mkdir -p "$other_home"
+                HOME="$other_home" LD_AUDIT="$SO" "$TMP_ROOT/other/$name" "$FAKE_CLIENT" >/dev/null 2>&1
+                other_rc=$?
+                other_log="$other_home/.cache/moon64/netsock.log"
+                check="probe: non-steam host '$name' opening steamclient.so leaves no log"
+                if [ "$other_rc" -ne 0 ]; then
+                    fail "$check" "loader rc=$other_rc, gate not exercised"
+                elif [ -e "$other_log" ]; then
+                    fail "$check" "unexpected log: $other_log"
+                else
+                    pass "$check"
+                fi
+            done
         else
             fail "probe: compile gate loader and fake steamclient.so" "gcc failed"
         fi
