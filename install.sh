@@ -903,7 +903,8 @@ if [ -d "$CR_DIR" ]; then
 fi
 
 if [ "$with_cloudredirect" = 1 ]; then
-    if [ -x "$HERE/bin/build-cloudredirect.sh" ]; then
+    # -f, not -x: get.sh downloads it with curl, which sets no execute bit.
+    if [ -f "$HERE/bin/build-cloudredirect.sh" ]; then
         CLOUD_REDIRECT_OUT="$MOON_DIR/cloudredirect" \
             bash "$HERE/bin/build-cloudredirect.sh" || die "CloudRedirect 64-bit build failed"
         [ -f "$MOON_DIR/cloudredirect/cloud_redirect.so" ] || die "CloudRedirect build produced nothing"
@@ -918,7 +919,7 @@ if [ "$with_cloudredirect" = 1 ]; then
         done
         ok "staged the 64-bit CloudRedirect pair in $CR_DIR"
     else
-        warn "bin/build-cloudredirect.sh missing; skipping CloudRedirect"
+        die "--with-cloudredirect needs bin/build-cloudredirect.sh next to install.sh"
     fi
 else
     dim "CloudRedirect not requested; pass --with-cloudredirect to include it"

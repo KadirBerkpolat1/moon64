@@ -8,8 +8,10 @@
 # `install.sh --prebuilt` from there: SLSsteam.so (and netsock64.so, when the
 # release has one) come prebuilt, so no git and no compiler are needed. Without
 # a prebuilt netsock64.so, install.sh builds it from that source if gcc is
-# installed. It stages ~/.local/share/moon64 and activates nothing; `moon64 on`
-# does that.
+# installed. With --with-cloudredirect it also fetches bin/build-cloudredirect.sh
+# and passes the flag on, so the 64-bit CloudRedirect pair is built and staged
+# too (needs git, cmake and g++). It stages ~/.local/share/moon64 and activates
+# nothing; `moon64 on` does that.
 #
 # Everything below is inside main(), so bash has read the whole script before
 # it runs any of it: a download cut short runs nothing, and no command can read
@@ -21,14 +23,16 @@ GET_FILES=(install.sh bin/moon64 bin/wrapper.64.sh versions.env patches/netsock6
 get_usage() {
     cat <<'EOF'
 Usage: curl -fsSL https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/get.sh | bash
-       curl -fsSL .../get.sh | bash -s -- [--install-deps | --dry-run | --help]
-       bash get.sh [--install-deps | --dry-run | --help]
+       curl -fsSL .../get.sh | bash -s -- [--install-deps] [--with-cloudredirect] [--dry-run | --help]
+       bash get.sh [--install-deps] [--with-cloudredirect] [--dry-run | --help]
 
-  --install-deps   let install.sh install missing prerequisites with the distro
-                   package manager, through a sudo that does not ask for a
-                   password (it never prompts)
-  --dry-run        print what would be downloaded and run; change nothing
-  --help           this text
+  --install-deps         let install.sh install missing prerequisites with the
+                         distro package manager, through a sudo that does not
+                         ask for a password (it never prompts)
+  --with-cloudredirect   also build and stage the 64-bit CloudRedirect pair
+                         (cloud saves); needs git, cmake and g++
+  --dry-run              print what would be downloaded and run; change nothing
+  --help                 this text
 
 Environment:
   MOON64_REF          git ref of moon64 to install from (default: main)
@@ -123,8 +127,8 @@ get_cert_patch() {
 
 main() {
     set -uo pipefail
-    local dry_run=0 arg ref base moon_dir f url rc log entry rerun=""
-    local -a pass=()
+    local dry_run=0 deps=0 cr_arg="" arg ref base moon_dir f url rc log entry rerun=""
+    local -a pass=() files=("${GET_FILES[@]}")
     GET_TMP=""
     GET_INSTALLING=0
     GET_HAD_DIR=0
@@ -133,7 +137,10 @@ main() {
         case "$arg" in
             --help|-h)      get_usage; return 0 ;;
             --dry-run)      dry_run=1 ;;
-            --install-deps) pass+=(--install-deps) ;;
+            --install-deps) pass+=(--install-deps); deps=1 ;;
+            --with-cloudredirect)
+                pass+=(--with-cloudredirect); files+=(bin/build-cloudredirect.sh)
+                cr_arg=" --with-cloudredirect" ;;
             *) get_fail "unknown argument: $arg (see --help)"; return 2 ;;
         esac
     done
@@ -150,7 +157,7 @@ main() {
     if [ "$dry_run" = 1 ]; then
         printf 'moon64 get.sh --dry-run: nothing will be downloaded or changed.\n'
         printf 'would download with curl, from %s:\n' "$base"
-        for f in "${GET_FILES[@]}"; do get_say "$base/$f"; done
+        for f in "${files[@]}"; do get_say "$base/$f"; done
         printf 'would run:  install.sh --prebuilt%s\n' "${pass[*]:+ ${pass[*]}}"
         get_say "SLSsteam.so: ${SLSM_PREBUILT_URL:-the default pinned in versions.env at $ref}"
         get_say "netsock64.so, pattern-status.txt, *.sha256: from the same release directory"
@@ -174,7 +181,7 @@ main() {
     trap 'exit 130' INT TERM
 
     printf 'moon64: downloading the installer from %s\n' "$base"
-    for f in "${GET_FILES[@]}"; do
+    for f in "${files[@]}"; do
         url="$base/$f"
         mkdir -p "$GET_TMP/src/$(dirname "$f")" || { get_fail "cannot write to $GET_TMP"; return 1; }
         curl -fsSL --connect-timeout 15 --max-time 60 -o "$GET_TMP/src/$f" "$url"
@@ -219,13 +226,13 @@ main() {
     get_fail "install.sh failed (exit $rc)"
     case "$(cat "$log" 2>/dev/null)" in
         *"missing prerequisites"*|*"missing build prerequisites"*)
-            if [ "${#pass[@]}" -eq 0 ]; then
+            if [ "$deps" = 0 ]; then
                 [ -z "${MOON64_REF:-}" ] || rerun="$rerun MOON64_REF=$(printf '%q' "$MOON64_REF")"
                 [ -z "${MOON64_DIR:-}" ] || rerun="$rerun MOON64_DIR=$(printf '%q' "$MOON64_DIR")"
                 [ -z "${SLSM_PREBUILT_URL:-}" ] || rerun="$rerun SLSM_PREBUILT_URL=$(printf '%q' "$SLSM_PREBUILT_URL")"
                 get_fail "install the packages listed above and run this again, or let install.sh"
                 get_fail "install them (it uses 'sudo -n' and stops if sudo wants a password):"
-                get_fail "  curl -fsSL $base/get.sh |$rerun bash -s -- --install-deps"
+                get_fail "  curl -fsSL $base/get.sh |$rerun bash -s -- --install-deps$cr_arg"
             fi
             ;;
     esac

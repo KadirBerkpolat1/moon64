@@ -113,6 +113,7 @@ for ref in main v-test broken; do
         mkdir -p "$RAW/$ref/$(dirname "$f")"
         cp "$REPO_ROOT/$f" "$RAW/$ref/$f"
     done
+    cp "$REPO_ROOT/bin/build-cloudredirect.sh" "$RAW/$ref/bin/build-cloudredirect.sh"
 done
 rm -f "$RAW/broken/bin/wrapper.64.sh"
 
@@ -444,6 +445,19 @@ assert_contains "g2: passed through" "moon64: running install.sh --prebuilt --in
 assert_contains "g2: install.sh will not prompt" "sudo needs a password, and install.sh will not prompt for one" "$out"
 assert_eq "g2: sudo was only asked non-interactively" "-n true" "$(cat "$sb/sudo.log" 2>/dev/null)"
 assert_not_contains "g2: no second re-run hint" "| bash -s -- --install-deps" "$out"
+
+# --- (k) --with-cloudredirect: build script fetched, flag reaches install.sh ---
+sb="$(make_sandbox k)"
+out="$(pipe_get "$sb" --with-cloudredirect --dry-run 2>&1)"; rc=$?
+assert_rc "k1: --dry-run exits 0" 0 "$rc" "$out"
+assert_contains "k1: lists the build script" "  https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/bin/build-cloudredirect.sh" "$out"
+assert_contains "k1: and the flag" "would run:  install.sh --prebuilt --with-cloudredirect" "$out"
+out="$(pipe_get "$sb" --with-cloudredirect 2>&1)"; rc=$?
+assert_rc "k2: no git or cmake on PATH: the CloudRedirect build fails" 1 "$rc" "$out"
+assert_contains "k2: fetched the build script" "https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/bin/build-cloudredirect.sh" "$(raw_urls "$sb")"
+assert_contains "k2: passed through" "moon64: running install.sh --prebuilt --with-cloudredirect" "$out"
+assert_contains "k2: reached the CloudRedirect build" "CloudRedirect 64-bit build failed" "$out"
+assert_absent "k2: nothing left behind" "$sb/home/.local/share/moon64"
 
 printf 'Summary: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

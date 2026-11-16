@@ -20,9 +20,9 @@ AGPL-3.0 — see [`LICENSE`](LICENSE).
 - **Built on your machine at install time, not redistributed here:** the
   64-bit `SLSsteam.so` (from
   [slsteam-moon-x64](https://github.com/KadirBerkpolat1/slsteam-moon-x64),
-  AGPL-3.0-only), CloudRedirect (from
-  [swwayps/cloudredirect-moon](https://github.com/swwayps/cloudredirect-moon),
-  only with `--with-cloudredirect`), and the Lumen and LuaTools fork trees
+  AGPL-3.0-only), CloudRedirect (from our fork
+  [cloudredirect-moon](https://github.com/KadirBerkpolat1/cloudredirect-moon) of
+  swwayps/cloudredirect-moon, only with `--with-cloudredirect`), and the Lumen and LuaTools fork trees
   (only with `--with-lumen-patch`). Each is cloned from the pin in
   [`versions.env`](versions.env) and keeps its own licence.
   `netsock64.so` is built from this repo's own source unless it is
@@ -234,9 +234,9 @@ build it.
 
 | path | what it is |
 |---|---|
-| `get.sh` | the `curl \| bash` installer: fetches `install.sh`, `bin/moon64`, `bin/wrapper.64.sh`, `versions.env` and `patches/netsock64/steamclient_audit64.c`, then runs `install.sh --prebuilt` |
+| `get.sh` | the `curl \| bash` installer: fetches `install.sh`, `bin/moon64`, `bin/wrapper.64.sh`, `versions.env` and `patches/netsock64/steamclient_audit64.c` (plus `bin/build-cloudredirect.sh` with `--with-cloudredirect`), then runs `install.sh --prebuilt` |
 | `patches/netsock64/steamclient_audit64.c` | `LD_AUDIT` shim that patches the cert-check function in the 64-bit `steamclient.so` at load time |
-| `bin/build-cloudredirect.sh` | builds CloudRedirect 64-bit from a pinned upstream commit |
+| `bin/build-cloudredirect.sh` | builds CloudRedirect 64-bit from a pinned commit of our fork |
 | `bin/wrapper.64.sh` | the 64-bit Steam launcher (what `SLSsteam/path/steam` becomes) |
 | `bin/moon64` | `on` / `off` / `status` / `doctor` switcher |
 | `install.sh` | stages every 64-bit piece; activates nothing |
@@ -288,8 +288,9 @@ to re-derive them for a new client build.
 
 ## 64-bit limits worth knowing
 
-- `cloud_redirect.so` is `LD_PRELOAD`ed into the client. The client runs on the
-  host (not inside the sniper container), so the *host* glibc is the ceiling.
+- `cloud_redirect.so` is `LD_PRELOAD`ed through the whole client chain: the outer
+  `steam` bootstrapper leaves it in `LD_PRELOAD` and only the inner client (inside
+  the pressure-vessel container) loads it, so the *host* glibc is the ceiling.
   The build needs `GLIBC_2.38` (from glibc's C23 `__isoc23_*` redirects) — fine
   on a current distro, too new for an older one. `build-cloudredirect.sh` checks
   this against the local glibc and refuses rather than producing a hook that

@@ -6,15 +6,16 @@
 # project natively with LINUX_32BIT=OFF, which is the branch upstream already
 # has for 64-bit hosts (it skips -m32, libatomic and the i686 include hacks).
 #
-# Pinned upstream commit: reproducible builds, and an obvious place to look when
-# a future upstream change must be picked up.
+# Pinned commit of our fork of swwayps/cloudredirect-moon: reproducible builds,
+# and the fork carries the steamrt64 bootstrapper fix (upstream's hook stripped
+# itself from LD_PRELOAD in the outer `steam`, so the client never loaded it).
 #
 #   build-cloudredirect.sh              build into ./out
 #   build-cloudredirect.sh --install    also install to ~/.local/share/CloudRedirect
 set -uo pipefail
 
-CLOUD_REDIRECT_REPO="${CLOUD_REDIRECT_REPO:-https://github.com/swwayps/cloudredirect-moon}"
-CLOUD_REDIRECT_COMMIT="${CLOUD_REDIRECT_COMMIT:-19da05507dc8294a744d74c04ba875d4ca3cf2f7}"
+CLOUD_REDIRECT_REPO="${CLOUD_REDIRECT_REPO:-https://github.com/KadirBerkpolat1/cloudredirect-moon}"
+CLOUD_REDIRECT_COMMIT="${CLOUD_REDIRECT_COMMIT:-7ed4dabbc761d846992f22c4b312adec617321b8}"
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${CLOUD_REDIRECT_WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/moon64/cloudredirect}"
@@ -52,7 +53,8 @@ if [ ! -d "$WORK/.git" ]; then
     dim "cloning $CLOUD_REDIRECT_REPO"
     git clone -q "$CLOUD_REDIRECT_REPO" "$WORK" || die "clone failed"
 fi
-( cd "$WORK" && git fetch -q origin 2>/dev/null || true )
+# A clone left by an older pin may point at another repository.
+( cd "$WORK" && git remote set-url origin "$CLOUD_REDIRECT_REPO" && git fetch -q origin 2>/dev/null || true )
 ( cd "$WORK" && git checkout -q "$CLOUD_REDIRECT_COMMIT" 2>/dev/null ) \
     || die "commit $CLOUD_REDIRECT_COMMIT not available in $WORK"
 ok "source at $( cd "$WORK" && git rev-parse --short HEAD )"
