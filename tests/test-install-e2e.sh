@@ -268,15 +268,14 @@ assert_contains "5: says Steam is back to how it was" "moon64 is off — Steam s
 
 # The whole home, before and after: install.sh only added the rollback target,
 # and on+off only left that target in place as SLSsteam.so (inert: nothing
-# loads it without an SLSsteam launcher) plus the netsock64 shim's log under
-# ~/.cache (case 4's stub launch loads the shim via LD_AUDIT; its hash is not
-# stable because the log records the pid, so hash the live file).
+# loads it without an SLSsteam launcher).  Case 4's stub launch loads the
+# netsock64 shim via LD_AUDIT, but no process there is named "steam", so the
+# shim must not create ~/.cache/moon64/netsock.log.
 assert_eq "5: install.sh added only the rollback target to HOME" \
     "> F ./.local/share/SLSsteam/SLSsteam.so.32 $(sha "$sb/rel32/tree/bin/SLSsteam.so")" \
     "$(diff <(printf '%s\n' "$HOME_BEFORE") <(printf '%s\n' "$HOME_INSTALLED") | sed -n '/^[<>]/p')"
 assert_eq "5: on+off left HOME as install.sh did, plus the inert SLSsteam.so" \
-    "> F ./.cache/moon64/netsock.log $(sha "$h/.cache/moon64/netsock.log")
-> F ./.local/share/SLSsteam/SLSsteam.so $(sha "$sb/rel32/tree/bin/SLSsteam.so")" \
+    "> F ./.local/share/SLSsteam/SLSsteam.so $(sha "$sb/rel32/tree/bin/SLSsteam.so")" \
     "$(diff <(printf '%s\n' "$HOME_INSTALLED") <(printf '%s\n' "$HOME_OFF") | sed -n '/^[<>]/p')"
 
 out="$(run bash "$sb/moon64/moon64" doctor 2>&1)"; rc=$?

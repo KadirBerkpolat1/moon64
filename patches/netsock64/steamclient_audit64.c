@@ -208,11 +208,12 @@ static void patch_one(const char *name, int quiet)
     logf_("patched steamclient.so at %p -> mov eax,1; ret", (void *)target);
 }
 
-// The shim is inherited by every process the launcher spawns: steam.sh's
-// mkdir/ln/readlink helpers, and every game and Proton process, which can
-// load ~/.steam/sdk64/steamclient.so themselves.  Only the Steam client may
-// log, scan or patch; everything else must leave memory and the log alone.
-// Same test SLSsteam uses (process name == "steam").
+// The shim is inherited by every process the launcher spawns: steam.sh and its
+// helpers, and every game and Proton process, which can load
+// ~/.steam/sdk64/steamclient.so themselves -- including ones whose name only
+// starts with "steam" (Proton's steam.exe, steamwebhelper).  Only the Steam
+// client may log, scan or patch; everything else must leave memory and the log
+// alone.  Same test SLSsteam and bin/moon64 use: process name == "steam".
 static int is_steam_process(void)
 {
     char buf[64];
@@ -224,7 +225,7 @@ static int is_steam_process(void)
     buf[n] = '\0';
     char* nl = strchr(buf, '\n');
     if (nl != NULL) *nl = '\0';
-    return strncmp(buf, "steam", 5) == 0;
+    return strcmp(buf, "steam") == 0;
 }
 
 unsigned int la_version(unsigned int version)
