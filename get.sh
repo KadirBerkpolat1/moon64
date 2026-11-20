@@ -11,7 +11,8 @@
 # installed. With --with-cloudredirect it also fetches bin/build-cloudredirect.sh
 # and passes the flag on, so the 64-bit CloudRedirect pair is built and staged
 # too (needs git, cmake, g++, make and perl). It stages ~/.local/share/moon64 and activates
-# nothing; `moon64 on` does that.
+# nothing; `moon64 on` does that. With --with-lumen-patch it also overlays the
+# pinned Lumen + LuaTools fork trees into ~/.local/share/Lumen (needs git).
 #
 # Everything below is inside main(), so bash has read the whole script before
 # it runs any of it: a download cut short runs nothing, and no command can read
@@ -31,6 +32,8 @@ Usage: curl -fsSL https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/
                          ask for a password (it never prompts)
   --with-cloudredirect   also build and stage the 64-bit CloudRedirect pair
                          (cloud saves); needs git, cmake, g++, make and perl
+  --with-lumen-patch     also overlay the pinned Lumen + LuaTools trees into
+                         ~/.local/share/Lumen (needs git)
   --dry-run              print what would be downloaded and run; change nothing
   --help                 this text
 
@@ -146,6 +149,8 @@ main() {
             --with-cloudredirect)
                 pass+=(--with-cloudredirect); files+=(bin/build-cloudredirect.sh)
                 cr_arg=" --with-cloudredirect" ;;
+            --with-lumen-patch)
+                pass+=(--with-lumen-patch) ;;
             *) get_fail "unknown argument: $arg (see --help)"; return 2 ;;
         esac
     done

@@ -257,6 +257,37 @@ assert_rc "f3: fallback without a toolchain stops" 1 "$rc" "$out"
 assert_contains "f3: names what the fallback needs" "missing build prerequisites" "$out"
 assert_absent "f3: nothing staged" "$sb/moon64/SLSsteam.so.64"
 
+# --- (h) --with-lumen-patch overlays the trees and stamps the About tab ----
+rel="$(make_release h)"
+printf 'release_tag=v20260101010101\n' >> "$rel/pattern-status.txt"
+sb="$(make_sandbox h)"
+mkdir -p "$sb/home/.local/share/Lumen/lua" "$sb/home/.local/share/Lumen/luatools"
+printf 'old\n' > "$sb/home/.local/share/Lumen/lua/boot.lua"
+lumen_repo="$TMP_ROOT/lumen-fixture"
+git init -q "$lumen_repo"
+mkdir -p "$lumen_repo/lua"
+printf 'new boot\n' > "$lumen_repo/lua/boot.lua"
+git -C "$lumen_repo" add -A
+git -C "$lumen_repo" -c user.email=t@t -c user.name=t commit -qm lumen
+lut_repo="$TMP_ROOT/luatools-fixture"
+git init -q "$lut_repo"
+mkdir -p "$lut_repo/plugin"
+printf '{}\n' > "$lut_repo/plugin/plugin.json"
+git -C "$lut_repo" add -A
+git -C "$lut_repo" -c user.email=t@t -c user.name=t commit -qm plugin
+lumen_sha="$(git -C "$lumen_repo" rev-parse HEAD)"
+lut_sha="$(git -C "$lut_repo" rev-parse HEAD)"
+out="$(in_sandbox "$sb" SLSM_PREBUILT_URL="file://$rel/SLSsteam.so" LUMEN_SRC="$lumen_repo" LUATOOLS_SRC="$lut_repo" bash "$REPO_ROOT/install.sh" --prebuilt --with-lumen-patch 2>&1)"; rc=$?
+assert_rc "h1: lumen-patch install succeeds" 0 "$rc" "$out"
+assert_contains "h1: uses the provided lumen checkout" "using checkout at $lumen_repo" "$out"
+assert_same "h1: overlays the lumen tree" "$lumen_repo/lua/boot.lua" "$sb/home/.local/share/Lumen/lua/boot.lua"
+assert_contains "h1: uses the provided plugin checkout" "using checkout at $lut_repo" "$out"
+assert_same "h1: overlays the plugin tree" "$lut_repo/plugin/plugin.json" "$sb/home/.local/share/Lumen/luatools/plugin.json"
+stamps="$sb/home/.local/share/Lumen/moon64-versions.json"
+if [ -f "$stamps" ]; then pass "h1: stamps the About tab"; else fail "h1: stamps the About tab" "missing $stamps"; fi
+assert_contains "h1: stamp records the sls release tag" '"slsteam_moon":{"tag":"v20260101010101"' "$(cat "$stamps" 2>/dev/null)"
+assert_contains "h1: stamp records the lumen commit" "\"lumen\":{\"tag\":\"${lumen_sha:0:7}\",\"id\":\"$lumen_sha\"" "$(cat "$stamps" 2>/dev/null)"
+assert_contains "h1: stamp records the plugin commit" "\"plugin\":{\"tag\":\"${lut_sha:0:7}\",\"id\":\"$lut_sha\"" "$(cat "$stamps" 2>/dev/null)"
 # --- (g) the documented default ------------------------------------------
 assert_contains "g1: default points at the project's release asset" \
     "https://github.com/KadirBerkpolat1/slsteam-moon-x64/releases/" \

@@ -459,5 +459,15 @@ assert_contains "k2: passed through" "moon64: running install.sh --prebuilt --wi
 assert_contains "k2: reached the CloudRedirect build" "CloudRedirect 64-bit build failed" "$out"
 assert_absent "k2: nothing left behind" "$sb/home/.local/share/moon64"
 
+# --- (l) --with-lumen-patch: passed through, tree fetch needs git ------------
+sb="$(make_sandbox l)"
+out="$(pipe_get "$sb" --with-lumen-patch --dry-run 2>&1)"; rc=$?
+assert_rc "l1: --dry-run exits 0" 0 "$rc" "$out"
+assert_contains "l1: and the flag" "would run:  install.sh --prebuilt --with-lumen-patch" "$out"
+out="$(pipe_get "$sb" --with-lumen-patch 2>&1)"; rc=$?
+assert_rc "l2: no git on PATH: the tree fetch is skipped loudly" 0 "$rc" "$out"
+assert_contains "l2: passed through" "moon64: running install.sh --prebuilt --with-lumen-patch" "$out"
+assert_contains "l2: install.sh names the missing git" "git is required for https://github.com/KadirBerkpolat1/lumen" "$out"
+assert_absent "l2: no About stamp when the tree fetch failed" "$sb/home/.local/share/Lumen/moon64-versions.json"
 printf 'Summary: %d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

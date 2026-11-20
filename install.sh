@@ -668,6 +668,12 @@ fetch_prebuilt_into() {
         return 2
     fi
     ok "pattern-status.txt was measured on this SLSsteam.so (binary_sha256 $got)"
+    # The release tag the fork's About tab stamps for this stack. Older
+    # releases predate the release_tag= line; an absent tag leaves the
+    # variable empty and the stamp omits the slsteam_moon entry.
+    if [ -f "$tmp/res/pattern-status.txt" ]; then
+        SLS64_RELEASE_TAG="$(status_sha256 "$tmp/res/pattern-status.txt" release_tag || true)"
+    fi
 
     fetch_netsock64_into "$tmp" "${url%/*}"
     ns_rc=$?
@@ -997,7 +1003,10 @@ if [ "$with_lumen_patch" = 1 ]; then
         lumen_src="$(dirname "$HERE")/../lumen"
         [ -f "$lumen_src/lua/boot.lua" ] || lumen_src="$LUMEN_CLONE_DIR"
     fi
+    lumen_sha=""
+    lut_sha=""
     if fetch_pinned "$LUMEN_REPO" "$LUMEN_REF" "$lumen_src"; then
+        lumen_sha="$(git -C "$lumen_src" rev-parse HEAD 2>/dev/null || true)"
         if [ -d "$HOME/.local/share/Lumen/lua" ]; then
             # Refuse a cross-version overlay: the fork tracks a specific Lumen.
             if [ -f "$HOME/.local/share/Lumen/versions.json" ] && \
@@ -1018,10 +1027,39 @@ if [ "$with_lumen_patch" = 1 ]; then
                 [ -d "$lut_src/plugin" ] || lut_src="$LUATOOLS_CLONE_DIR"
             fi
             if fetch_pinned "$LUATOOLS_REPO" "$LUATOOLS_REF" "$lut_src"; then
+                lut_sha="$(git -C "$lut_src" rev-parse HEAD 2>/dev/null || true)"
                 # The fork keeps the plugin under plugin/; the install keeps it
                 # directly under luatools/ (luatools/{plugin.json,backend,public}).
                 overlay_tree "$lut_src/plugin" "$HOME/.local/share/Lumen/luatools" luatools-patch
             fi
+        fi
+        # Stamp the fork's About tab (about.lua prefers moon64-versions.json
+        # over the upstream installer's versions.json). Written only here: the
+        # fork's tab ships with this very overlay, and only when the Lumen tree
+        # fetch succeeded, so a failed fetch never wipes an earlier stamp. An
+        # absent piece (a source build has no release tag; a plain tree has no
+        # git commit) omits that entry and the tab reports it as unknown.
+        stamp_out="$HOME/.local/share/Lumen/moon64-versions.json"
+        stamp_tmp="$stamp_out.tmp.$$"
+        stamp_body="{"; stamp_sep=""
+        if [ -n "${SLS64_RELEASE_TAG:-}" ]; then
+            stamp_body="$stamp_body\"slsteam_moon\":{\"tag\":\"$SLS64_RELEASE_TAG\",\"channel\":\"stable\",\"source\":\"moon64\"}"
+            stamp_sep="," 
+        fi
+        if [ -n "$lumen_sha" ]; then
+            stamp_body="$stamp_body$stamp_sep\"lumen\":{\"tag\":\"${lumen_sha:0:7}\",\"id\":\"$lumen_sha\",\"channel\":\"stable\",\"source\":\"moon64\"}"
+            stamp_sep="," 
+        fi
+        if [ -n "$lut_sha" ]; then
+            stamp_body="$stamp_body$stamp_sep\"plugin\":{\"tag\":\"${lut_sha:0:7}\",\"id\":\"$lut_sha\",\"channel\":\"stable\",\"source\":\"moon64\"}"
+        fi
+        stamp_body="$stamp_body}"
+        if mkdir -p "$(dirname "$stamp_out")" && printf '%s\n' "$stamp_body" > "$stamp_tmp" \
+            && mv -f "$stamp_tmp" "$stamp_out"; then
+            ok "stamped the About tab versions ($stamp_out)"
+        else
+            rm -f "$stamp_tmp"
+            warn "could not write $stamp_out; the About tab keeps its old stamps"
         fi
     fi
 else
