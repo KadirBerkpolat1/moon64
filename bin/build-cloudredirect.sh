@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # Build CloudRedirect for the 64-bit Steam client and optionally install it.
 #
-# Upstream ships prebuilt 32-bit binaries and build.sh hard-asserts `ELF 32-bit`,
-# so it cannot be reused for this port. What we do instead is build the CMake
-# project natively with LINUX_32BIT=OFF, which is the branch upstream already
-# has for 64-bit hosts (it skips -m32, libatomic and the i686 include hacks).
-#
-# Pinned commit of our fork of swwayps/cloudredirect-moon: reproducible builds,
-# and the fork carries the steamrt64 bootstrapper fix (upstream's hook stripped
-# itself from LD_PRELOAD in the outer `steam`, so the client never loaded it).
+# The pinned tree is our cloudredirect-moon fork, which absorbs jayool's
+# maintained 64-bit line (v2.6.6-linux64.3: the x86_64 steamclient hooks, the
+# 5-minute steamclient.so wait with unload signaling, AutoCloud library-root
+# prefixes) on top of the swwayps fork's steamrt64 bootstrapper fix. Configure
+# with LINUX_X86_64=ON; curl/OpenSSL link statically when the checkout has
+# deps/install64, dynamically otherwise (the client's sniper runtime provides
+# libcurl.so.4, and the build host is the glibc ceiling). Pinned commit for
+# reproducible builds and one obvious place to pick up future upstream changes.
 #
 #   build-cloudredirect.sh              build into ./out
 #   build-cloudredirect.sh --install    also install to ~/.local/share/CloudRedirect
 set -uo pipefail
 
 CLOUD_REDIRECT_REPO="${CLOUD_REDIRECT_REPO:-https://github.com/KadirBerkpolat1/cloudredirect-moon}"
-CLOUD_REDIRECT_COMMIT="${CLOUD_REDIRECT_COMMIT:-7ed4dabbc761d846992f22c4b312adec617321b8}"
+CLOUD_REDIRECT_COMMIT="${CLOUD_REDIRECT_COMMIT:-8b5bd2625a6c2f56f0eb3af374dcada0de92a757}"
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${CLOUD_REDIRECT_WORKDIR:-${XDG_CACHE_HOME:-$HOME/.cache}/moon64/cloudredirect}"
@@ -60,13 +60,13 @@ fi
 ok "source at $( cd "$WORK" && git rev-parse --short HEAD )"
 
 # --- build ------------------------------------------------------------------
-# Drop a stale build tree: a 32-bit configure would otherwise be reused and the
-# class check below would fail with a confusing message.
+# Drop a stale build tree: a configure from an older pin (different CMake
+# switch) would otherwise be reused and the class check below would mislead.
 if [ -d "$WORK/build64" ]; then
     cmake_out="$(cmake -LA -N "$WORK/build64" 2>/dev/null || true)"
-    case "$cmake_out" in *'LINUX_32BIT:BOOL=OFF'*) ;; *) rm -rf "$WORK/build64" ;; esac
+    case "$cmake_out" in *'LINUX_X86_64:BOOL=ON'*) ;; *) rm -rf "$WORK/build64" ;; esac
 fi
-cmake -S "$WORK" -B "$WORK/build64" -DCMAKE_BUILD_TYPE=Release -DLINUX_32BIT=OFF >/tmp/moon64-cr-configure.log 2>&1 \
+cmake -S "$WORK" -B "$WORK/build64" -DCMAKE_BUILD_TYPE=Release -DLINUX_X86_64=ON -DCR_GIT_SHA="${CLOUD_REDIRECT_COMMIT:0:7}" >/tmp/moon64-cr-configure.log 2>&1 \
     || { tail -20 /tmp/moon64-cr-configure.log; die "cmake configure failed"; }
 cmake --build "$WORK/build64" --target cloud_redirect cloud_redirect_cli -j"$(nproc)" \
     >/tmp/moon64-cr-build.log 2>&1 \
