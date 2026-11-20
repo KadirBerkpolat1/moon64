@@ -288,6 +288,63 @@ if [ -f "$stamps" ]; then pass "h1: stamps the About tab"; else fail "h1: stamps
 assert_contains "h1: stamp records the sls release tag" '"slsteam_moon":{"tag":"v20260101010101"' "$(cat "$stamps" 2>/dev/null)"
 assert_contains "h1: stamp records the lumen commit" "\"lumen\":{\"tag\":\"${lumen_sha:0:7}\",\"id\":\"$lumen_sha\"" "$(cat "$stamps" 2>/dev/null)"
 assert_contains "h1: stamp records the plugin commit" "\"plugin\":{\"tag\":\"${lut_sha:0:7}\",\"id\":\"$lut_sha\"" "$(cat "$stamps" 2>/dev/null)"
+
+# --- (h2) a second run REFRESHES a managed clone and re-stamps -------------
+# Update All works by re-running this installer. The first managed run clones
+# the pinned forks under ~/.local/share/moon64/src/; without a refresh the
+# second run would reuse that stale clone, overlay the old tree and stamp the
+# old commit, leaving the About tab stuck on "update available" forever.
+rel="$(make_release h2)"
+printf 'release_tag=v20260101010101\n' >> "$rel/pattern-status.txt"
+sb="$(make_sandbox h2)"
+mkdir -p "$sb/home/.local/share/Lumen/lua" "$sb/home/.local/share/Lumen/luatools"
+lumen_seed="$TMP_ROOT/lumen-seed"; git init -q -b main "$lumen_seed"
+mkdir -p "$lumen_seed/lua"; printf 'boot one\n' > "$lumen_seed/lua/boot.lua"
+git -C "$lumen_seed" add -A
+git -C "$lumen_seed" -c user.email=t@t -c user.name=t commit -qm one
+lumen_bare="$TMP_ROOT/lumen-remote.git"; git clone -q --bare "$lumen_seed" "$lumen_bare"
+lut_seed="$TMP_ROOT/luatools-seed"; git init -q -b main "$lut_seed"
+mkdir -p "$lut_seed/plugin"; printf '{"v":1}\n' > "$lut_seed/plugin/plugin.json"
+git -C "$lut_seed" add -A
+git -C "$lut_seed" -c user.email=t@t -c user.name=t commit -qm one
+lut_bare="$TMP_ROOT/luatools-remote.git"; git clone -q --bare "$lut_seed" "$lut_bare"
+run_h2() {
+    in_sandbox "$sb" SLSM_PREBUILT_URL="file://$rel/SLSsteam.so" \
+        LUMEN_REPO="file://$lumen_bare" LUATOOLS_REPO="file://$lut_bare" \
+        bash "$REPO_ROOT/install.sh" --prebuilt --with-lumen-patch 2>&1
+}
+out="$(run_h2)"; rc=$?
+assert_rc "h2a: first managed run clones and installs" 0 "$rc" "$out"
+assert_contains "h2a: clones lumen under src/" "cloning file://${lumen_bare%.git} (main) into $sb/home/.local/share/moon64/src/lumen" "$out"
+first_sha="$(git -C "$sb/home/.local/share/moon64/src/lumen" rev-parse HEAD)"
+assert_contains "h2a: stamp carries the first commit" "\"lumen\":{\"tag\":\"${first_sha:0:7}\"" "$(cat "$sb/home/.local/share/Lumen/moon64-versions.json")"
+printf 'boot two\n' > "$lumen_seed/lua/boot.lua"
+git -C "$lumen_seed" add -A
+git -C "$lumen_seed" -c user.email=t@t -c user.name=t commit -qm two
+git -C "$lumen_seed" push -q "$lumen_bare" main
+printf '{"v":2}\n' > "$lut_seed/plugin/plugin.json"
+git -C "$lut_seed" add -A
+git -C "$lut_seed" -c user.email=t@t -c user.name=t commit -qm two
+git -C "$lut_seed" push -q "$lut_bare" main
+out="$(run_h2)"; rc=$?
+assert_rc "h2b: second managed run refreshes and installs" 0 "$rc" "$out"
+assert_contains "h2b: says it refreshed lumen" "refreshed $sb/home/.local/share/moon64/src/lumen" "$out"
+assert_contains "h2b: says it refreshed the plugin" "refreshed $sb/home/.local/share/moon64/src/luatools-moon" "$out"
+second_sha="$(git -C "$sb/home/.local/share/moon64/src/lumen" rev-parse HEAD)"
+lut_second="$(git -C "$sb/home/.local/share/moon64/src/luatools-moon" rev-parse HEAD)"
+if [ "$second_sha" != "$first_sha" ]; then pass "h2b: the clone moved to the new commit"; else fail "h2b: the clone moved to the new commit" "HEAD unchanged at $second_sha"; fi
+assert_same "h2b: the overlay follows the refresh" "$lumen_seed/lua/boot.lua" "$sb/home/.local/share/Lumen/lua/boot.lua"
+assert_contains "h2b: the stamp follows the refresh" "\"lumen\":{\"tag\":\"${second_sha:0:7}\"" "$(cat "$sb/home/.local/share/Lumen/moon64-versions.json")"
+assert_contains "h2b: the plugin stamp follows too" "\"plugin\":{\"tag\":\"${lut_second:0:7}\"" "$(cat "$sb/home/.local/share/Lumen/moon64-versions.json")"
+# A user-provided checkout (LUMEN_SRC) is never refreshed, even on a rerun.
+user_repo="$TMP_ROOT/lumen-user"
+git clone -q "$lumen_seed" "$user_repo"
+printf 'local edit\n' > "$user_repo/lua/boot.lua"
+out="$(in_sandbox "$sb" SLSM_PREBUILT_URL="file://$rel/SLSsteam.so" LUMEN_SRC="$user_repo" LUATOOLS_REPO="file://$lut_bare" bash "$REPO_ROOT/install.sh" --prebuilt --with-lumen-patch 2>&1)"; rc=$?
+assert_rc "h2c: user checkout is used, not refreshed" 0 "$rc" "$out"
+assert_contains "h2c: says it uses the checkout as is" "using checkout at $user_repo" "$out"
+assert_not_contains "h2c: never says refreshed about the user tree" "refreshed $user_repo" "$out"
+assert_same "h2c: local edit survives the rerun" "$user_repo/lua/boot.lua" "$sb/home/.local/share/Lumen/lua/boot.lua"
 # --- (g) the documented default ------------------------------------------
 assert_contains "g1: default points at the project's release asset" \
     "https://github.com/KadirBerkpolat1/slsteam-moon-x64/releases/" \

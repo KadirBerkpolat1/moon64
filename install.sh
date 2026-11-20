@@ -938,13 +938,30 @@ fi
 # that did not already exist -- so on a fresh v2.9 it installed nothing and the
 # menu called six RPCs that were never registered. Install the trees instead.
 
-# fetch_pinned <repo-url> <ref> <dir> -> 0 when <dir> is a usable checkout.
-# Public repos clone anonymously over HTTPS; gh is used when already
+# fetch_pinned <repo-url> <ref> <dir> [refresh] -> 0 when <dir> is a usable
+# checkout. Public repos clone anonymously over HTTPS; gh is used when already
 # authenticated, and GIT_TERMINAL_PROMPT=0 avoids hanging on prompts.
+# refresh=1 marks a checkout moon64 itself manages under *_CLONE_DIR: an
+# existing clone is fetched to <ref> and force-checked-out first, so an
+# Update-All-style rerun actually moves -- without it the second run reused the
+# stale clone, stamped its old commit and left the About tab stuck on "update".
+# A checkout the user pointed at with LUMEN_SRC/LUATOOLS_SRC, or one sitting
+# next to this script, is theirs: used as is, never rewritten.
 fetch_pinned() {
-    local repo="$1" ref="$2" dir="$3" slug cloned=0
+    local repo="$1" ref="$2" dir="$3" refresh="${4:-0}" slug cloned=0
     if [ -f "$dir/.git/HEAD" ]; then
-        ok "using checkout at $dir"
+        if [ "$refresh" = 1 ]; then
+            dim "refreshing $dir to $ref"
+            if ! GIT_TERMINAL_PROMPT=0 git -C "$dir" fetch -q --depth 1 origin "$ref" 2>/dev/null \
+               || ! git -C "$dir" checkout -q --force FETCH_HEAD 2>/dev/null; then
+                bad "cannot refresh $dir to $ref"
+                dim "  delete the directory and run this again to re-clone"
+                return 1
+            fi
+            ok "refreshed $dir to $(git -C "$dir" rev-parse --short HEAD 2>/dev/null || echo "$ref")"
+        else
+            ok "using checkout at $dir"
+        fi
         return 0
     fi
     command -v git >/dev/null || { bad "git is required for $repo"; return 1; }
@@ -1005,7 +1022,9 @@ if [ "$with_lumen_patch" = 1 ]; then
     fi
     lumen_sha=""
     lut_sha=""
-    if fetch_pinned "$LUMEN_REPO" "$LUMEN_REF" "$lumen_src"; then
+    lumen_refresh=0
+    [ "$lumen_src" = "$LUMEN_CLONE_DIR" ] && lumen_refresh=1
+    if fetch_pinned "$LUMEN_REPO" "$LUMEN_REF" "$lumen_src" "$lumen_refresh"; then
         lumen_sha="$(git -C "$lumen_src" rev-parse HEAD 2>/dev/null || true)"
         if [ -d "$HOME/.local/share/Lumen/lua" ]; then
             # Refuse a cross-version overlay: the fork tracks a specific Lumen.
@@ -1026,7 +1045,9 @@ if [ "$with_lumen_patch" = 1 ]; then
                 lut_src="$(dirname "$HERE")/../luatools-moon"
                 [ -d "$lut_src/plugin" ] || lut_src="$LUATOOLS_CLONE_DIR"
             fi
-            if fetch_pinned "$LUATOOLS_REPO" "$LUATOOLS_REF" "$lut_src"; then
+            lut_refresh=0
+            [ "$lut_src" = "$LUATOOLS_CLONE_DIR" ] && lut_refresh=1
+            if fetch_pinned "$LUATOOLS_REPO" "$LUATOOLS_REF" "$lut_src" "$lut_refresh"; then
                 lut_sha="$(git -C "$lut_src" rev-parse HEAD 2>/dev/null || true)"
                 # The fork keeps the plugin under plugin/; the install keeps it
                 # directly under luatools/ (luatools/{plugin.json,backend,public}).
