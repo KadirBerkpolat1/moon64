@@ -10,7 +10,7 @@
 # a prebuilt netsock64.so, install.sh builds it from that source if gcc is
 # installed. With --with-cloudredirect it also fetches bin/build-cloudredirect.sh
 # and passes the flag on, so the 64-bit CloudRedirect pair is built and staged
-# too (needs git, cmake and g++). It stages ~/.local/share/moon64 and activates
+# too (needs git, cmake, g++, make and perl). It stages ~/.local/share/moon64 and activates
 # nothing; `moon64 on` does that.
 #
 # Everything below is inside main(), so bash has read the whole script before
@@ -30,7 +30,7 @@ Usage: curl -fsSL https://raw.githubusercontent.com/KadirBerkpolat1/moon64/main/
                          distro package manager, through a sudo that does not
                          ask for a password (it never prompts)
   --with-cloudredirect   also build and stage the 64-bit CloudRedirect pair
-                         (cloud saves); needs git, cmake and g++
+                         (cloud saves); needs git, cmake, g++, make and perl
   --dry-run              print what would be downloaded and run; change nothing
   --help                 this text
 
@@ -71,14 +71,19 @@ get_restore() {
 }
 
 get_cleanup() {
-    if [ "$GET_INSTALLING" = 1 ]; then
+    # Idempotent: the EXIT trap and the explicit call at the bottom of this
+    # script can both run it (bash 5.3 never runs an EXIT trap at a natural
+    # EOF when the script arrives on stdin, so that call is the one that
+    # counts; where the trap does fire, the second pass is a no-op).
+    if [ "${GET_INSTALLING:-0}" = 1 ]; then
+        GET_INSTALLING=0
         get_restore
-        if [ "$GET_HAD_SLS_DIR" = 0 ] && [ -e "$GET_SLS_DIR" ]; then
+        if [ "${GET_HAD_SLS_DIR:-1}" = 0 ] && [ -e "${GET_SLS_DIR:-}" ]; then
             rm -rf "$GET_SLS_DIR"
             get_fail "removed $GET_SLS_DIR, which this run had created"
         fi
     fi
-    [ -z "$GET_TMP" ] || rm -rf "$GET_TMP"
+    [ -z "${GET_TMP:-}" ] || { local t="$GET_TMP"; GET_TMP=""; rm -rf "$t"; }
 }
 
 # get_cert_patch <moon dir> - one or two lines on the P2P cert patch, from the
@@ -240,3 +245,6 @@ main() {
 }
 
 main "$@"
+rc=$?
+get_cleanup
+exit "$rc"
