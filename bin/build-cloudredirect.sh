@@ -5,10 +5,11 @@
 # maintained 64-bit line (v2.6.6-linux64.3: the x86_64 steamclient hooks, the
 # 5-minute steamclient.so wait with unload signaling, AutoCloud library-root
 # prefixes) on top of the swwayps fork's steamrt64 bootstrapper fix. Configure
-# with LINUX_X86_64=ON; curl/OpenSSL link statically when the checkout has
-# deps/install64, dynamically otherwise (the client's sniper runtime provides
-# libcurl.so.4, and the build host is the glibc ceiling). Pinned commit for
-# reproducible builds and one obvious place to pick up future upstream changes.
+# with LINUX_X86_64=ON. curl and OpenSSL are linked STATICALLY with their
+# symbols hidden (the client's container resolves libcurl from the Steam
+# Runtime, not from the build host, so a dynamic link depends on that copy
+# keeping every symbol); this script builds them once from jayool's release
+# recipe (openssl 3.0.15, curl 8.11.1) and caches them under deps/install64.
 #
 #   build-cloudredirect.sh              build into ./out
 #   build-cloudredirect.sh --install    also install to ~/.local/share/CloudRedirect
@@ -43,6 +44,8 @@ done
 command -v git     >/dev/null || die "git is required"
 command -v cmake   >/dev/null || die "cmake is required"
 command -v g++     >/dev/null || die "g++ is required"
+command -v make    >/dev/null || die "make is required"
+command -v perl    >/dev/null || die "perl is required (OpenSSL Configure)"
 command -v file    >/dev/null || die "file is required"
 command -v readelf >/dev/null || die "readelf (binutils) is required"
 command -v ldd     >/dev/null || die "ldd is required"
@@ -59,6 +62,42 @@ fi
     || die "commit $CLOUD_REDIRECT_COMMIT not available in $WORK"
 ok "source at $( cd "$WORK" && git rev-parse --short HEAD )"
 
+# --- static deps (curl + OpenSSL) -------------------------------------------
+DEPS="$WORK/deps/install64"
+DEPS_WANT="openssl-3.0.15+curl-8.11.1"
+build_deps64() {
+    local SRCD="$WORK/deps/src" v1=3.0.15 v2=8.11.1
+    rm -rf "$SRCD"; mkdir -p "$SRCD" "$DEPS"
+    dim "building static OpenSSL $v1 + curl $v2 (one-time; cached in $DEPS)"
+    curl -fsSL -o "$SRCD/openssl.tar.gz" "https://github.com/openssl/openssl/releases/download/openssl-$v1/openssl-$v1.tar.gz" \
+        || die "cannot download OpenSSL $v1"
+    curl -fsSL -o "$SRCD/curl.tar.gz" "https://github.com/curl/curl/releases/download/curl-${v2//./_}/curl-$v2.tar.gz" \
+        || die "cannot download curl $v2"
+    tar xzf "$SRCD/openssl.tar.gz" -C "$SRCD" || die "cannot extract OpenSSL"
+    tar xzf "$SRCD/curl.tar.gz" -C "$SRCD" || die "cannot extract curl"
+    ( cd "$SRCD/openssl-$v1" \
+      && ./Configure linux-x86_64 no-shared no-dso no-tests no-engine -fPIC --prefix="$DEPS" --libdir=lib >/dev/null \
+      && make -s -j"$(nproc)" >/dev/null 2>&1 && make -s install_sw >/dev/null 2>&1 ) \
+        || die "static OpenSSL build failed"
+    ( cd "$SRCD/curl-$v2" \
+      && ./configure --prefix="$DEPS" --disable-shared --enable-static --with-openssl="$DEPS" \
+           --without-libpsl --without-zlib --without-brotli --without-zstd --without-libidn2 --without-nghttp2 \
+           --without-librtmp --without-libssh2 --disable-ldap --disable-ldaps --disable-rtsp --disable-ftp \
+           --disable-dict --disable-telnet --disable-tftp --disable-pop3 --disable-imap --disable-smb --disable-smtp \
+           --disable-gopher --disable-mqtt --disable-manual --disable-docs \
+           --without-ca-bundle --with-ca-path=/etc/ssl/certs --with-ca-fallback CFLAGS=-fPIC >/dev/null \
+      && make -s -j"$(nproc)" >/dev/null 2>&1 && make -s install >/dev/null 2>&1 ) \
+        || die "static curl build failed"
+    rm -rf "$SRCD"
+}
+if [ -s "$DEPS/lib/libcurl.a" ] && [ "$(cat "$DEPS/built-from.txt" 2>/dev/null || true)" = "$DEPS_WANT" ]; then
+    ok "static curl/OpenSSL from cache ($DEPS_WANT)"
+else
+    build_deps64
+    printf '%s\n' "$DEPS_WANT" > "$DEPS/built-from.txt"
+    ok "static OpenSSL + curl built into $DEPS"
+fi
+
 # --- build ------------------------------------------------------------------
 # Drop a stale build tree: a configure from an older pin (different CMake
 # switch) would otherwise be reused and the class check below would mislead.
@@ -66,7 +105,7 @@ if [ -d "$WORK/build64" ]; then
     cmake_out="$(cmake -LA -N "$WORK/build64" 2>/dev/null || true)"
     case "$cmake_out" in *'LINUX_X86_64:BOOL=ON'*) ;; *) rm -rf "$WORK/build64" ;; esac
 fi
-cmake -S "$WORK" -B "$WORK/build64" -DCMAKE_BUILD_TYPE=Release -DLINUX_X86_64=ON -DCR_GIT_SHA="${CLOUD_REDIRECT_COMMIT:0:7}" >/tmp/moon64-cr-configure.log 2>&1 \
+cmake -S "$WORK" -B "$WORK/build64" -DCMAKE_BUILD_TYPE=Release -DLINUX_X86_64=ON -DCMAKE_SHARED_LINKER_FLAGS=-Wl,--as-needed -DCR_GIT_SHA="${CLOUD_REDIRECT_COMMIT:0:7}" >/tmp/moon64-cr-configure.log 2>&1 \
     || { tail -20 /tmp/moon64-cr-configure.log; die "cmake configure failed"; }
 cmake --build "$WORK/build64" --target cloud_redirect cloud_redirect_cli -j"$(nproc)" \
     >/tmp/moon64-cr-build.log 2>&1 \
@@ -82,12 +121,21 @@ for f in cloud_redirect.so cloud_redirect_cli; do
     install -m 755 "$WORK/build64/$f" "$OUT/$f"
 done
 ok "artifacts in $OUT"
+
+# The .so must not reach for the Steam Runtime's curl/OpenSSL at load time.
+needed="$(LC_ALL=C readelf -d "$OUT/cloud_redirect.so" 2>/dev/null || true)"
+case "$needed" in
+    *libcurl*|*libssl*|*libcrypto*)
+        die "cloud_redirect.so links curl/OpenSSL dynamically (expected static, hidden)" ;;
+esac
+ok "curl/OpenSSL linked statically"
 size_of() { stat -c %s "$1" 2>/dev/null || echo 0; }
 dim "cloud_redirect.so     $(size_of "$OUT/cloud_redirect.so") B"
 dim "cloud_redirect_cli    $(size_of "$OUT/cloud_redirect_cli") B"
 
-# The hook is LD_PRELOADed into the client, which runs on this host (not inside
-# the sniper container), so the local glibc is the ceiling that matters.
+# The hook is LD_PRELOADed into the client, whose pressure-vessel container
+# resolves against this host's glibc via /run/host (measured on the live
+# steamrt64 client), so the local glibc is the ceiling that matters.
 local_glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)"
 [ -n "$local_glibc" ] || local_glibc="$(LC_ALL=C ldd --version 2>/dev/null | awk 'NR==1{for(i=NF;i>=1;i--) if($i ~ /^[0-9]+\.[0-9]+$/){print $i; exit}}')"
 need_glibc="$(LC_ALL=C readelf -V "$OUT/cloud_redirect.so" 2>/dev/null \
